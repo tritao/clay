@@ -410,6 +410,29 @@ typedef struct Clay_TextElementConfig {
 
 CLAY__WRAPPER_STRUCT(Clay_TextElementConfig);
 
+// A line returned by an optional external paragraph-layout function. The
+// string slice must reference the paragraph passed to that function and is
+// copied into Clay's frame-local line storage before the callback returns.
+typedef struct Clay_TextLayoutLine {
+    Clay_Dimensions dimensions;
+    Clay_StringSlice line;
+    Clay_Vector2 offset;
+} Clay_TextLayoutLine;
+
+// Result returned by an optional external paragraph-layout function. The
+// layoutId is opaque to Clay and is copied to text render commands so a
+// renderer can associate each emitted line with its retained text layout.
+typedef struct Clay_TextLayoutResult {
+    bool success;
+    Clay_Dimensions dimensions;
+    int32_t lineCount;
+    const Clay_TextLayoutLine *lines;
+    uint64_t layoutId;
+} Clay_TextLayoutResult;
+
+typedef Clay_TextLayoutResult (*Clay_LayoutTextFunction)(
+    Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
+
 // Aspect Ratio --------------------------------
 
 // Controls various settings related to aspect ratio scaling element.
@@ -657,6 +680,10 @@ typedef struct Clay_TextRenderData {
     uint16_t letterSpacing;
     // The height of the bounding box for this line of text.
     uint16_t lineHeight;
+    // Opaque external paragraph-layout identifier, or zero for Clay-managed text.
+    uint64_t textLayoutId;
+    // Zero-based line index within the external paragraph layout.
+    uint32_t textLineIndex;
 } Clay_TextRenderData;
 
 // Render command data when commandType == CLAY_RENDER_COMMAND_TYPE_RECTANGLE
@@ -890,6 +917,8 @@ typedef CLAY_PACKED_ENUM {
     CLAY_ERROR_TYPE_FLOATING_CONTAINER_PARENT_NOT_FOUND,
     // An element was declared that using CLAY_SIZING_PERCENT but the percentage value was over 1. Percentage values are expected to be in the 0-1 range.
     CLAY_ERROR_TYPE_PERCENTAGE_OVER_1,
+    // An external paragraph-layout function returned an invalid or failed result.
+    CLAY_ERROR_TYPE_TEXT_LAYOUT_FUNCTION_FAILED,
     // Clay encountered an internal error. It would be wonderful if you could report this so we can fix it!
     CLAY_ERROR_TYPE_INTERNAL_ERROR,
     // Clay__OpenElement was called more times than Clay__CloseElement, so there were still remaining open elements when the layout ended.
@@ -907,6 +936,7 @@ typedef struct Clay_ErrorData {
     // CLAY_ERROR_TYPE_DUPLICATE_ID - Two elements were declared with exactly the same ID within one layout.
     // CLAY_ERROR_TYPE_FLOATING_CONTAINER_PARENT_NOT_FOUND - A floating element was declared using CLAY_ATTACH_TO_ELEMENT_ID and either an invalid .parentId was provided or no element with the provided .parentId was found.
     // CLAY_ERROR_TYPE_PERCENTAGE_OVER_1 - An element was declared that using CLAY_SIZING_PERCENT but the percentage value was over 1. Percentage values are expected to be in the 0-1 range.
+    // CLAY_ERROR_TYPE_TEXT_LAYOUT_FUNCTION_FAILED - The external paragraph-layout function returned an invalid or failed result.
     // CLAY_ERROR_TYPE_INTERNAL_ERROR - Clay encountered an internal error. It would be wonderful if you could report this so we can fix it!
     // CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE - Clay__OpenElement was called more times than Clay__CloseElement, so there were still remaining open elements when the layout ended.
     // CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED - Clay ran out of capacity in its internal hash map for storing element IDs -> elements. This limit can be increased with Clay_SetMaxElementCount().
@@ -1002,6 +1032,11 @@ CLAY_DLL_EXPORT Clay_ScrollContainerData Clay_GetScrollContainerData(Clay_Elemen
 // - measureTextFunction is a user provided function that adheres to the interface Clay_Dimensions (Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 // - userData is a pointer that will be transparently passed through when the measureTextFunction is called.
 CLAY_DLL_EXPORT void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFunction)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData), void *userData);
+// Binds an optional callback that owns paragraph shaping and line breaking.
+// When set, Clay uses its result during the text wrapping phase and does not
+// run its internal word wrapping for text elements.
+CLAY_DLL_EXPORT void Clay_SetLayoutTextFunction(Clay_LayoutTextFunction layoutTextFunction,
+                                                void *userData);
 // Experimental - Used in cases where Clay needs to integrate with a system that manages its own scrolling containers externally.
 // Please reach out if you plan to use this function, as it may be subject to change.
 CLAY_DLL_EXPORT void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrollOffsetFunction)(uint32_t elementId, void *userData), void *userData);
@@ -1194,6 +1229,9 @@ CLAY__ARRAY_DEFINE_FUNCTIONS(Clay_RenderCommand, Clay_RenderCommandArray)
 typedef struct {
     Clay_Dimensions dimensions;
     Clay_String line;
+    Clay_Vector2 offset;
+    uint64_t textLayoutId;
+    uint32_t textLineIndex;
 } Clay__WrappedTextLine;
 
 CLAY__ARRAY_DEFINE(Clay__WrappedTextLine, Clay__WrappedTextLineArray)
@@ -1346,6 +1384,7 @@ struct Clay_Context {
     uint32_t generation;
     uintptr_t arenaResetOffset;
     void *measureTextUserData;
+    void *layoutTextUserData;
     void *queryScrollOffsetUserData;
     Clay_Arena internalArena;
     // Layout Elements / Render Commands
@@ -1397,9 +1436,11 @@ Clay_String Clay__WriteStringToCharBuffer(Clay__charArray *buffer, Clay_String s
 
 #ifdef CLAY_WASM
     __attribute__((import_module("clay"), import_name("measureTextFunction"))) Clay_Dimensions Clay__MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    __attribute__((import_module("clay"), import_name("layoutTextFunction"))) Clay_TextLayoutResult Clay__LayoutText(Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
     __attribute__((import_module("clay"), import_name("queryScrollOffsetFunction"))) Clay_Vector2 Clay__QueryScrollOffset(uint32_t elementId, void *userData);
 #else
     Clay_Dimensions (*Clay__MeasureText)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    Clay_TextLayoutResult (*Clay__LayoutText)(Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
     Clay_Vector2 (*Clay__QueryScrollOffset)(uint32_t elementId, void *userData);
 #endif
 
@@ -2589,6 +2630,54 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         Clay__MeasureTextCacheItem *measureTextCacheItem = Clay__MeasureTextCached(&textElementData->text, &containerElement->textConfig);
         float lineWidth = 0;
         float lineHeight = containerElement->textConfig.lineHeight > 0 ? (float)containerElement->textConfig.lineHeight : textElementData->preferredDimensions.height;
+        if (Clay__LayoutText) {
+            Clay_TextLayoutResult externalLayout = Clay__LayoutText(
+                CLAY__INIT(Clay_StringSlice) {
+                    .length = textElementData->text.length,
+                    .chars = textElementData->text.chars,
+                    .baseChars = textElementData->text.chars
+                }, &containerElement->textConfig, containerElement->dimensions.width,
+                context->layoutTextUserData);
+            const bool valid = externalLayout.success && externalLayout.lineCount >= 0 &&
+                               externalLayout.lineCount <= context->wrappedTextLines.capacity -
+                                                               context->wrappedTextLines.length &&
+                               (externalLayout.lineCount == 0 || externalLayout.lines != CLAY__NULL);
+            if (!valid) {
+                context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
+                    .errorType = CLAY_ERROR_TYPE_TEXT_LAYOUT_FUNCTION_FAILED,
+                    .errorText = CLAY_STRING("The external paragraph-layout function returned an invalid result."),
+                    .userData = context->errorHandler.userData
+                });
+                continue;
+            }
+            for (int32_t lineIndex = 0; lineIndex < externalLayout.lineCount; ++lineIndex) {
+                const Clay_TextLayoutLine &line = externalLayout.lines[lineIndex];
+                if (line.line.length < 0 || (line.line.length > 0 && line.line.chars == CLAY__NULL)) {
+                    context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
+                        .errorType = CLAY_ERROR_TYPE_TEXT_LAYOUT_FUNCTION_FAILED,
+                        .errorText = CLAY_STRING("The external paragraph-layout function returned an invalid line."),
+                        .userData = context->errorHandler.userData
+                    });
+                    textElementData->wrappedLines.length = 0;
+                    break;
+                }
+                Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) {
+                    .dimensions = line.dimensions,
+                    .line = CLAY__INIT(Clay_String) {
+                        .isStaticallyAllocated = false,
+                        .length = line.line.length,
+                        .chars = line.line.chars
+                    },
+                    .offset = line.offset,
+                    .textLayoutId = externalLayout.layoutId,
+                    .textLineIndex = (uint32_t)lineIndex
+                });
+                textElementData->wrappedLines.length++;
+            }
+            if (textElementData->wrappedLines.length == externalLayout.lineCount)
+                containerElement->dimensions.height = externalLayout.dimensions.height;
+            continue;
+        }
         int32_t lineLengthChars = 0;
         int32_t lineStartOffset = 0;
         if (!measureTextCacheItem->containsNewlines && textElementData->preferredDimensions.width <= containerElement->dimensions.width) {
@@ -2980,11 +3069,15 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                             continue;
                         }
                         float offset = (currentElementBoundingBox.width - wrappedLine->dimensions.width);
-                        if (textElementConfig->textAlignment == CLAY_TEXT_ALIGN_LEFT) {
-                            offset = 0;
-                        }
-                        if (textElementConfig->textAlignment == CLAY_TEXT_ALIGN_CENTER) {
-                            offset /= 2;
+                        if (wrappedLine->textLayoutId) {
+                            offset = wrappedLine->offset.x;
+                        } else {
+                            if (textElementConfig->textAlignment == CLAY_TEXT_ALIGN_LEFT) {
+                                offset = 0;
+                            }
+                            if (textElementConfig->textAlignment == CLAY_TEXT_ALIGN_CENTER) {
+                                offset /= 2;
+                            }
                         }
                         Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) {
                             .boundingBox = { currentElementBoundingBox.x + offset, currentElementBoundingBox.y + yPosition, wrappedLine->dimensions.width, wrappedLine->dimensions.height },
@@ -2995,6 +3088,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                                 .fontSize = textElementConfig->fontSize,
                                 .letterSpacing = textElementConfig->letterSpacing,
                                 .lineHeight = textElementConfig->lineHeight,
+                                .textLayoutId = wrappedLine->textLayoutId,
+                                .textLineIndex = wrappedLine->textLineIndex,
                             }},
                             .userData = textElementConfig->userData,
                             .id = Clay__HashNumber(lineIndex, currentElement->id).id,
@@ -4059,6 +4154,11 @@ void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFunction)(Clay_Str
     Clay_Context* context = Clay_GetCurrentContext();
     Clay__MeasureText = measureTextFunction;
     context->measureTextUserData = userData;
+}
+void Clay_SetLayoutTextFunction(Clay_LayoutTextFunction layoutTextFunction, void *userData) {
+    Clay_Context* context = Clay_GetCurrentContext();
+    Clay__LayoutText = layoutTextFunction;
+    context->layoutTextUserData = userData;
 }
 void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrollOffsetFunction)(uint32_t elementId, void *userData), void *userData) {
     Clay_Context* context = Clay_GetCurrentContext();
