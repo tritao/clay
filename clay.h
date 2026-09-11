@@ -433,6 +433,17 @@ typedef struct Clay_TextLayoutResult {
 typedef Clay_TextLayoutResult (*Clay_LayoutTextFunction)(
     Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
 
+// Intrinsic metrics returned by an external text engine before Clay assigns a
+// constrained width. minWidth is the smallest width the engine recommends
+// for the text element; unwrappedDimensions describes its natural size.
+typedef struct Clay_TextIntrinsicDimensions {
+    Clay_Dimensions unwrappedDimensions;
+    float minWidth;
+} Clay_TextIntrinsicDimensions;
+
+typedef Clay_TextIntrinsicDimensions (*Clay_MeasureTextIntrinsicFunction)(
+    Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+
 // Aspect Ratio --------------------------------
 
 // Controls various settings related to aspect ratio scaling element.
@@ -1032,6 +1043,11 @@ CLAY_DLL_EXPORT Clay_ScrollContainerData Clay_GetScrollContainerData(Clay_Elemen
 // - measureTextFunction is a user provided function that adheres to the interface Clay_Dimensions (Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 // - userData is a pointer that will be transparently passed through when the measureTextFunction is called.
 CLAY_DLL_EXPORT void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFunction)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData), void *userData);
+// Binds an optional intrinsic metrics callback for external paragraph text.
+// When a layout callback is installed, this avoids Clay's word measurement
+// cache while still allowing text elements to participate in sizing.
+CLAY_DLL_EXPORT void Clay_SetMeasureTextIntrinsicFunction(
+    Clay_MeasureTextIntrinsicFunction measureTextIntrinsicFunction, void *userData);
 // Binds an optional callback that owns paragraph shaping and line breaking.
 // When set, Clay uses its result during the text wrapping phase and does not
 // run its internal word wrapping for text elements.
@@ -1384,6 +1400,7 @@ struct Clay_Context {
     uint32_t generation;
     uintptr_t arenaResetOffset;
     void *measureTextUserData;
+    void *measureTextIntrinsicUserData;
     void *layoutTextUserData;
     void *queryScrollOffsetUserData;
     Clay_Arena internalArena;
@@ -1436,10 +1453,12 @@ Clay_String Clay__WriteStringToCharBuffer(Clay__charArray *buffer, Clay_String s
 
 #ifdef CLAY_WASM
     __attribute__((import_module("clay"), import_name("measureTextFunction"))) Clay_Dimensions Clay__MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    __attribute__((import_module("clay"), import_name("measureTextIntrinsicFunction"))) Clay_TextIntrinsicDimensions Clay__MeasureTextIntrinsic(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
     __attribute__((import_module("clay"), import_name("layoutTextFunction"))) Clay_TextLayoutResult Clay__LayoutText(Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
     __attribute__((import_module("clay"), import_name("queryScrollOffsetFunction"))) Clay_Vector2 Clay__QueryScrollOffset(uint32_t elementId, void *userData);
 #else
     Clay_Dimensions (*Clay__MeasureText)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    Clay_TextIntrinsicDimensions (*Clay__MeasureTextIntrinsic)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
     Clay_TextLayoutResult (*Clay__LayoutText)(Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
     Clay_Vector2 (*Clay__QueryScrollOffset)(uint32_t elementId, void *userData);
 #endif
@@ -2138,15 +2157,32 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
     }
 
     Clay__int32_tArray_Add(&context->layoutElementChildrenBuffer, context->layoutElements.length - 1);
-    Clay__MeasureTextCacheItem *textMeasured = Clay__MeasureTextCached(&text, &textConfig);
     Clay_ElementId elementId = Clay__HashNumber(parentElement->children.length + parentElement->floatingChildrenCount, parentElement->id);
     textElement->id = elementId.id;
     Clay__AddHashMapItem(elementId, textElement);
     Clay__StringArray_Add(&context->layoutElementIdStrings, elementId.stringId);
-    Clay_Dimensions textDimensions = { .width = textMeasured->unwrappedDimensions.width, .height = textConfig.lineHeight > 0 ? (float)textConfig.lineHeight : textMeasured->unwrappedDimensions.height };
+    Clay_Dimensions preferredDimensions = CLAY__DEFAULT_STRUCT;
+    float minWidth = 0.0f;
+    if (Clay__LayoutText && Clay__MeasureTextIntrinsic) {
+        Clay_TextIntrinsicDimensions intrinsic = Clay__MeasureTextIntrinsic(
+            CLAY__INIT(Clay_StringSlice) {
+                .length = text.length,
+                .chars = text.chars,
+                .baseChars = text.chars
+            }, &textConfig, context->measureTextIntrinsicUserData);
+        preferredDimensions = intrinsic.unwrappedDimensions;
+        minWidth = intrinsic.minWidth;
+    } else {
+        // Preserve the legacy path when an external paragraph engine does not
+        // provide intrinsic metrics.
+        Clay__MeasureTextCacheItem *textMeasured = Clay__MeasureTextCached(&text, &textConfig);
+        preferredDimensions = textMeasured->unwrappedDimensions;
+        minWidth = textMeasured->minWidth;
+    }
+    Clay_Dimensions textDimensions = { .width = preferredDimensions.width, .height = textConfig.lineHeight > 0 ? (float)textConfig.lineHeight : preferredDimensions.height };
     textElement->dimensions = textDimensions;
-    textElement->minDimensions = CLAY__INIT(Clay_Dimensions) { .width = textMeasured->minWidth, .height = textDimensions.height };
-    textElement->textElementData = CLAY__INIT(Clay__TextElementData) { .text = text, .preferredDimensions = textMeasured->unwrappedDimensions };
+    textElement->minDimensions = CLAY__INIT(Clay_Dimensions) { .width = minWidth, .height = textDimensions.height };
+    textElement->textElementData = CLAY__INIT(Clay__TextElementData) { .text = text, .preferredDimensions = preferredDimensions };
     parentElement->children.length++;
 }
 
@@ -2627,7 +2663,12 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         Clay__TextElementData *textElementData = &element->textElementData;
         textElementData->wrappedLines = CLAY__INIT(Clay__WrappedTextLineArraySlice) { .length = 0, .internalArray = &context->wrappedTextLines.internalArray[context->wrappedTextLines.length] };
         Clay_LayoutElement *containerElement = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&textElements, textElementIndex));
-        Clay__MeasureTextCacheItem *measureTextCacheItem = Clay__MeasureTextCached(&textElementData->text, &containerElement->textConfig);
+        // An external paragraph layout callback owns line breaking and must
+        // not pay for Clay's word tokenization before that callback runs.
+        Clay__MeasureTextCacheItem *measureTextCacheItem = NULL;
+        if (!Clay__LayoutText) {
+            measureTextCacheItem = Clay__MeasureTextCached(&textElementData->text, &containerElement->textConfig);
+        }
         float lineWidth = 0;
         float lineHeight = containerElement->textConfig.lineHeight > 0 ? (float)containerElement->textConfig.lineHeight : textElementData->preferredDimensions.height;
         if (Clay__LayoutText) {
@@ -4154,6 +4195,11 @@ void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFunction)(Clay_Str
     Clay_Context* context = Clay_GetCurrentContext();
     Clay__MeasureText = measureTextFunction;
     context->measureTextUserData = userData;
+}
+void Clay_SetMeasureTextIntrinsicFunction(Clay_MeasureTextIntrinsicFunction measureTextIntrinsicFunction, void *userData) {
+    Clay_Context* context = Clay_GetCurrentContext();
+    Clay__MeasureTextIntrinsic = measureTextIntrinsicFunction;
+    context->measureTextIntrinsicUserData = userData;
 }
 void Clay_SetLayoutTextFunction(Clay_LayoutTextFunction layoutTextFunction, void *userData) {
     Clay_Context* context = Clay_GetCurrentContext();
