@@ -165,6 +165,7 @@ For help starting out or to discuss clay, considering joining [the discord serve
     * [Clay_MinMemorySize](#clay_minmemorysize)
     * [Clay_CreateArenaWithCapacityAndMemory](#clay_createarenawithcapacityandmemory)
     * [Clay_SetMeasureTextFunction](#clay_setmeasuretextfunction)
+    * [Clay_SetMeasureElementFunction](#clay_setmeasureelementfunction)
     * [Clay_ResetMeasureTextCache](#clay_resetmeasuretextcache)
     * [Clay_SetMaxElementCount](#clay_setmaxelementcount)
     * [Clay_SetMaxMeasureTextCacheWordCount](#clay_setmaxmeasuretextcachewordcount)
@@ -647,6 +648,23 @@ Takes a pointer to a function that can be used to measure the `width, height` di
 **Note 1: This string is not guaranteed to be null terminated.** Clay saves significant performance overhead by using slices when wrapping text instead of having to clone new null terminated strings. If your renderer does not support **ptr, length** style strings (e.g. Raylib), you will need to clone this to a new C string before rendering.
 
 **Note 2: It is essential that this function is as fast as possible.** For text heavy use-cases this function is called many times, and despite the fact that clay caches text measurements internally, it can easily become the dominant overall layout cost if the provided function is slow. **This is on the hot path!**
+
+---
+
+### Clay_SetMeasureElementFunction
+
+`void Clay_SetMeasureElementFunction(Clay_MeasureElementFunction measureElementFunction, void* userData)`
+
+Binds an optional intrinsic measurement callback for custom elements. Clay
+invokes the callback for each element whose `.custom.customData` is non-null,
+passing the element ID and the configured min/max constraints. The returned
+dimensions are used for `FIT` and `GROW` axes, then clamped to those
+constraints. A valid returned baseline is measured from the element's top
+edge and participates in baseline alignment.
+
+The callback is allowed to be called once per sizing pass, so implementations
+should be cheap or cache by element ID and constraints. Return non-negative,
+finite dimensions; invalid results are ignored.
 
 ---
 

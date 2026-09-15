@@ -487,6 +487,28 @@ typedef struct Clay_TextIntrinsicDimensions {
 typedef Clay_TextIntrinsicDimensions (*Clay_MeasureTextIntrinsicFunction)(
     Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
 
+// Constraints supplied to an external intrinsic element measurer. The
+// callback is installed with Clay_SetMeasureElementFunction and is invoked
+// for elements that provide non-null customData.
+typedef struct Clay_MeasureConstraints {
+    float minWidth;
+    float maxWidth;
+    float minHeight;
+    float maxHeight;
+} Clay_MeasureConstraints;
+
+// Intrinsic metrics returned by an external element measurer. Dimensions are
+// clamped to the element's configured sizing constraints before layout uses
+// them. A baseline is measured from the element's top edge.
+typedef struct Clay_MeasureResult {
+    Clay_Dimensions dimensions;
+    float baseline;
+    bool hasBaseline;
+} Clay_MeasureResult;
+
+typedef Clay_MeasureResult (*Clay_MeasureElementFunction)(
+    Clay_ElementId id, Clay_MeasureConstraints constraints, void *userData);
+
 // Aspect Ratio --------------------------------
 
 // Controls various settings related to aspect ratio scaling element.
@@ -1091,6 +1113,10 @@ CLAY_DLL_EXPORT void Clay_SetMeasureTextFunction(Clay_Dimensions (*measureTextFu
 // cache while still allowing text elements to participate in sizing.
 CLAY_DLL_EXPORT void Clay_SetMeasureTextIntrinsicFunction(
     Clay_MeasureTextIntrinsicFunction measureTextIntrinsicFunction, void *userData);
+// Binds an optional intrinsic measurement callback for custom elements. Clay
+// invokes it for elements whose custom.customData is non-null.
+CLAY_DLL_EXPORT void Clay_SetMeasureElementFunction(
+    Clay_MeasureElementFunction measureElementFunction, void *userData);
 // Binds an optional callback that owns paragraph shaping and line breaking.
 // When set, Clay uses its result during the text wrapping phase and does not
 // run its internal word wrapping for text elements.
@@ -1460,6 +1486,7 @@ struct Clay_Context {
     uintptr_t arenaResetOffset;
     void *measureTextUserData;
     void *measureTextIntrinsicUserData;
+    void *measureElementUserData;
     void *layoutTextUserData;
     void *queryScrollOffsetUserData;
     Clay_Arena internalArena;
@@ -1514,11 +1541,13 @@ Clay_String Clay__WriteStringToCharBuffer(Clay__charArray *buffer, Clay_String s
 #ifdef CLAY_WASM
     __attribute__((import_module("clay"), import_name("measureTextFunction"))) Clay_Dimensions Clay__MeasureText(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
     __attribute__((import_module("clay"), import_name("measureTextIntrinsicFunction"))) Clay_TextIntrinsicDimensions Clay__MeasureTextIntrinsic(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    __attribute__((import_module("clay"), import_name("measureElementFunction"))) Clay_MeasureResult Clay__MeasureElement(Clay_ElementId id, Clay_MeasureConstraints constraints, void *userData);
     __attribute__((import_module("clay"), import_name("layoutTextFunction"))) Clay_TextLayoutResult Clay__LayoutText(Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
     __attribute__((import_module("clay"), import_name("queryScrollOffsetFunction"))) Clay_Vector2 Clay__QueryScrollOffset(uint32_t elementId, void *userData);
 #else
     Clay_Dimensions (*Clay__MeasureText)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
     Clay_TextIntrinsicDimensions (*Clay__MeasureTextIntrinsic)(Clay_StringSlice text, Clay_TextElementConfig *config, void *userData);
+    Clay_MeasureResult (*Clay__MeasureElement)(Clay_ElementId id, Clay_MeasureConstraints constraints, void *userData);
     Clay_TextLayoutResult (*Clay__LayoutText)(Clay_StringSlice text, Clay_TextElementConfig *config, float availableWidth, void *userData);
     Clay_Vector2 (*Clay__QueryScrollOffset)(uint32_t elementId, void *userData);
 #endif
@@ -2717,6 +2746,80 @@ Clay_SizingAxis Clay__GetElementSizing(Clay_LayoutElement* element, bool xAxis) 
     }
 }
 
+bool Clay__IsFinite(float value) {
+    return value == value && value > -CLAY__MAXFLOAT && value < CLAY__MAXFLOAT;
+}
+
+float Clay__MeasureElementAxisLimit(Clay_SizingAxis sizing, float parentAvailable,
+                                    bool minimum) {
+    if (sizing.type == CLAY__SIZING_TYPE_FIXED)
+        return sizing.size.minMax.min;
+    if (sizing.type == CLAY__SIZING_TYPE_PERCENT)
+        return CLAY__MAX(0.0f, parentAvailable) * sizing.size.percent;
+    if (minimum)
+        return CLAY__MAX(0.0f, sizing.size.minMax.min);
+    float limit = sizing.size.minMax.max;
+    if (parentAvailable > 0.0f)
+        limit = CLAY__MIN(limit, parentAvailable);
+    return CLAY__MAX(limit, CLAY__MAX(0.0f, sizing.size.minMax.min));
+}
+
+Clay_MeasureConstraints Clay__GetMeasureElementConstraints(Clay_LayoutElement *element,
+                                                            Clay_LayoutElement *parent) {
+    Clay_LayoutConfig *parentLayoutConfig = &parent->config.layout;
+    const float parentWidth = CLAY__MAX(
+        0.0f, parent->dimensions.width - parentLayoutConfig->padding.left -
+                   parentLayoutConfig->padding.right);
+    const float parentHeight = CLAY__MAX(
+        0.0f, parent->dimensions.height - parentLayoutConfig->padding.top -
+                   parentLayoutConfig->padding.bottom);
+    Clay_SizingAxis width = Clay__GetElementSizing(element, true);
+    Clay_SizingAxis height = Clay__GetElementSizing(element, false);
+    return CLAY__INIT(Clay_MeasureConstraints) {
+        .minWidth = Clay__MeasureElementAxisLimit(width, parentWidth, true),
+        .maxWidth = Clay__MeasureElementAxisLimit(width, parentWidth, false),
+        .minHeight = Clay__MeasureElementAxisLimit(height, parentHeight, true),
+        .maxHeight = Clay__MeasureElementAxisLimit(height, parentHeight, false),
+    };
+}
+
+float Clay__ClampMeasuredElementDimension(float value, float minimum, float maximum) {
+    if (!Clay__IsFinite(value) || value < 0.0f)
+        return 0.0f;
+    return CLAY__MIN(CLAY__MAX(value, minimum), maximum);
+}
+
+void Clay__ApplyMeasureElement(Clay_LayoutElement *element, Clay_LayoutElement *parent) {
+    if (!Clay__MeasureElement || element->isTextElement ||
+        !element->config.custom.customData)
+        return;
+    Clay_Context *context = Clay_GetCurrentContext();
+    Clay_MeasureConstraints constraints =
+        Clay__GetMeasureElementConstraints(element, parent);
+    Clay_LayoutElementHashMapItem *mapItem = Clay__GetHashMapItem(element->id);
+    Clay_MeasureResult result = Clay__MeasureElement(
+        mapItem->elementId, constraints, context->measureElementUserData);
+    if (!Clay__IsFinite(result.dimensions.width) || !Clay__IsFinite(result.dimensions.height) ||
+        result.dimensions.width < 0.0f || result.dimensions.height < 0.0f)
+        return;
+
+    Clay_SizingAxis width = Clay__GetElementSizing(element, true);
+    Clay_SizingAxis height = Clay__GetElementSizing(element, false);
+    if (width.type == CLAY__SIZING_TYPE_FIT || width.type == CLAY__SIZING_TYPE_GROW) {
+        element->dimensions.width = Clay__ClampMeasuredElementDimension(
+            result.dimensions.width, constraints.minWidth, constraints.maxWidth);
+    }
+    if (height.type == CLAY__SIZING_TYPE_FIT || height.type == CLAY__SIZING_TYPE_GROW) {
+        element->dimensions.height = Clay__ClampMeasuredElementDimension(
+            result.dimensions.height, constraints.minHeight, constraints.maxHeight);
+    }
+    if (result.hasBaseline && Clay__IsFinite(result.baseline) && result.baseline >= 0.0f &&
+        result.baseline <= element->dimensions.height) {
+        element->baseline = result.baseline;
+        element->hasBaseline = true;
+    }
+}
+
 // Writes out the location of text elements to layout elements buffer 1
 void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArray* textElementsOut, Clay__int32_tArray* aspectRatioElementsOut) {
     Clay_Context* context = Clay_GetCurrentContext();
@@ -2800,6 +2903,10 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 if (childElement->exiting) {
                     continue;
                 }
+
+                Clay__ApplyMeasureElement(childElement, parent);
+                childSizing = Clay__GetElementSizing(childElement, xAxis);
+                childSize = xAxis ? childElement->dimensions.width : childElement->dimensions.height;
 
                 if (childSizing.type != CLAY__SIZING_TYPE_PERCENT
                     && childSizing.type != CLAY__SIZING_TYPE_FIXED
@@ -4766,6 +4873,11 @@ void Clay_SetMeasureTextIntrinsicFunction(Clay_MeasureTextIntrinsicFunction meas
     Clay_Context* context = Clay_GetCurrentContext();
     Clay__MeasureTextIntrinsic = measureTextIntrinsicFunction;
     context->measureTextIntrinsicUserData = userData;
+}
+void Clay_SetMeasureElementFunction(Clay_MeasureElementFunction measureElementFunction, void *userData) {
+    Clay_Context* context = Clay_GetCurrentContext();
+    Clay__MeasureElement = measureElementFunction;
+    context->measureElementUserData = userData;
 }
 void Clay_SetLayoutTextFunction(Clay_LayoutTextFunction layoutTextFunction, void *userData) {
     Clay_Context* context = Clay_GetCurrentContext();
