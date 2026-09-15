@@ -1327,6 +1327,11 @@ Clay_LayoutConfig {
         CLAY_DISTRIBUTE_START (default) | CLAY_DISTRIBUTE_CENTER | CLAY_DISTRIBUTE_END |
         CLAY_DISTRIBUTE_SPACE_BETWEEN | CLAY_DISTRIBUTE_SPACE_AROUND | CLAY_DISTRIBUTE_SPACE_EVENLY;
     };
+    Clay_LayoutWrapMode wrapMode {
+        CLAY_WRAP_NO_WRAP (default) | CLAY_WRAP_WRAP;
+    };
+    uint16_t rowGap;
+    uint16_t columnGap;
     Clay_Sizing sizing { // Recommended to use the provided macros here - see #sizing for more in depth explanation
         .width = CLAY_SIZING_FIT(float min, float max) (default) | CLAY_SIZING_GROW(float min, float max) | CLAY_SIZING_FIXED(float width) | CLAY_SIZING_PERCENT(float percent)
         .height = CLAY_SIZING_FIT(float min, float max) (default) | CLAY_SIZING_GROW(float min, float max) | CLAY_SIZING_FIXED(float height) | CLAY_SIZING_PERCENT(float percent)
@@ -1364,6 +1369,9 @@ Controls white-space "padding" around the **outside** of child elements.
 
 Controls the white-space **between** child elements as they are laid out. When `.layoutDirection` is `CLAY_LEFT_TO_RIGHT` (default), this will be horizontal space, whereas for `CLAY_TOP_TO_BOTTOM` it will be vertical space.
 
+`childGap` is retained as a shorthand fallback when both `rowGap` and
+`columnGap` are zero. New layouts should use the axis-specific gap fields.
+
 <img width="600" alt="Screenshot 2024-08-22 at 11 05 15 AM" src="https://github.com/user-attachments/assets/fa0dae1f-1936-47f6-a299-634bd7d40d58">
 
 ---
@@ -1387,9 +1395,28 @@ wrappers remain transparent to row alignment.
 
 ---
 
+**`.wrapMode`** - `Clay_LayoutWrapMode`
+
+`CLAY_WRAP_NO_WRAP` keeps children on one row or column. `CLAY_WRAP_WRAP`
+flows children onto additional rows for `CLAY_LEFT_TO_RIGHT` layouts or
+columns for `CLAY_TOP_TO_BOTTOM` layouts when the main axis is full. Each line
+gets its own main-axis distribution and cross-axis alignment. Oversized single
+children remain on their own line and are not shrunk by wrapping.
+
+---
+
+**`.rowGap` and `.columnGap`** - `uint16_t`
+
+`rowGap` controls vertical space between wrapped rows and `columnGap` controls
+horizontal space between wrapped columns. They also provide the main-axis gap
+for non-wrapped vertical and horizontal layouts respectively. When both are
+zero, the older `childGap` value is used as a shorthand for both axes.
+
+---
+
 **`.childDistribution`** - `Clay_ChildDistribution`
 
-Controls how free space is distributed along the layout direction. `CLAY_DISTRIBUTE_START` places children at the start, `CLAY_DISTRIBUTE_CENTER` centers them as a group, and `CLAY_DISTRIBUTE_END` places them at the end. `CLAY_DISTRIBUTE_SPACE_BETWEEN`, `CLAY_DISTRIBUTE_SPACE_AROUND`, and `CLAY_DISTRIBUTE_SPACE_EVENLY` add free-space gaps between and around children. The configured `childGap` remains in addition to any distributed free space.
+Controls how free space is distributed along the layout direction. `CLAY_DISTRIBUTE_START` places children at the start, `CLAY_DISTRIBUTE_CENTER` centers them as a group, and `CLAY_DISTRIBUTE_END` places them at the end. `CLAY_DISTRIBUTE_SPACE_BETWEEN`, `CLAY_DISTRIBUTE_SPACE_AROUND`, and `CLAY_DISTRIBUTE_SPACE_EVENLY` add free-space gaps between and around children. The configured main-axis gap remains in addition to any distributed free space. With wrapping enabled, distribution is calculated independently for each line.
 
 External text measurement and paragraph-layout callbacks may return an
 optional first-line baseline measured from the top of the text box. Clay uses

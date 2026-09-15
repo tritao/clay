@@ -335,6 +335,15 @@ typedef CLAY_PACKED_ENUM {
     CLAY_DISTRIBUTE_SPACE_EVENLY,
 } Clay_ChildDistribution;
 
+// Controls whether children continue onto additional rows or columns when
+// they exceed the parent's available main-axis space.
+typedef CLAY_PACKED_ENUM {
+    // (default) Keeps all children on one row or column.
+    CLAY_WRAP_NO_WRAP,
+    // Places overflowing children on the next row or column.
+    CLAY_WRAP_WRAP,
+} Clay_LayoutWrapMode;
+
 // Controls the minimum and maximum size in pixels that this element is allowed to grow or shrink to,
 // overriding sizing types such as FIT or GROW.
 typedef struct Clay_SizingMinMax {
@@ -380,6 +389,9 @@ typedef struct Clay_LayoutConfig {
     Clay_ChildAlignment childAlignment; // Controls how child elements are aligned on the cross axis.
     Clay_ChildDistribution childDistribution; // Controls how free space is distributed along the layout axis.
     Clay_LayoutDirection layoutDirection; // Controls the direction in which child elements will be automatically laid out.
+    Clay_LayoutWrapMode wrapMode; // Controls whether children flow onto additional rows or columns.
+    uint16_t rowGap; // Controls the vertical gap between wrapped rows.
+    uint16_t columnGap; // Controls the horizontal gap between wrapped columns.
 } Clay_LayoutConfig;
 
 CLAY__WRAPPER_STRUCT(Clay_LayoutConfig);
@@ -1284,6 +1296,18 @@ typedef struct {
 CLAY__ARRAY_DEFINE(Clay__WrappedTextLine, Clay__WrappedTextLineArray)
 
 typedef struct {
+    float mainSize;
+    float crossSize;
+    float crossOffset;
+    float leadingSpace;
+    float distributedGap;
+    float baseline;
+    int32_t childCount;
+} Clay__WrapLine;
+
+CLAY__ARRAY_DEFINE(Clay__WrapLine, Clay__WrapLineArray)
+
+typedef struct {
     Clay_String text;
     Clay_Dimensions preferredDimensions;
     Clay__WrappedTextLineArraySlice wrappedLines;
@@ -1310,6 +1334,7 @@ typedef struct Clay_LayoutElement {
     };
     uint32_t id;
     uint16_t floatingChildrenCount;
+    int32_t wrapLine;
     bool isTextElement;
     // True if the element is currently in an exit transition, and is "synthetic"
     // i.e. data was retained from previous frames
@@ -1449,6 +1474,7 @@ struct Clay_Context {
     // Misc Data Structures
     Clay__StringArray layoutElementIdStrings;
     Clay__WrappedTextLineArray wrappedTextLines;
+    Clay__WrapLineArray wrapLines;
     Clay__LayoutElementTreeNodeArray layoutElementTreeNodeArray1;
     Clay__LayoutElementTreeRootArray layoutElementTreeRoots;
     Clay__LayoutElementHashMapItemArray layoutElementsHashMapInternal;
@@ -1948,6 +1974,8 @@ Clay_LayoutElementHashMapItem *Clay__GetHashMapItem(uint32_t id) {
     return &Clay_LayoutElementHashMapItem_DEFAULT;
 }
 
+float Clay__MainAxisGap(const Clay_LayoutConfig *layoutConfig);
+
 void Clay__UpdateAspectRatioBox(Clay_LayoutElement *layoutElement) {
     if (layoutElement->config.aspectRatio.aspectRatio != 0) {
         if (layoutElement->dimensions.width == 0 && layoutElement->dimensions.height != 0) {
@@ -1993,7 +2021,8 @@ void Clay__CloseElement(void) {
             }
             Clay__int32_tArray_Add(&context->layoutElementChildren, childIndex);
         }
-        float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) * layoutConfig->childGap);
+        float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) *
+                                 Clay__MainAxisGap(layoutConfig));
         openLayoutElement->dimensions.width += childGap;
         if (!elementHasClipHorizontal) {
             openLayoutElement->minDimensions.width += childGap;
@@ -2016,7 +2045,8 @@ void Clay__CloseElement(void) {
             }
             Clay__int32_tArray_Add(&context->layoutElementChildren, childIndex);
         }
-        float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) * layoutConfig->childGap);
+        float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) *
+                                 Clay__MainAxisGap(layoutConfig));
         openLayoutElement->dimensions.height += childGap;
         if (!elementHasClipVertical) {
             openLayoutElement->minDimensions.height += childGap;
@@ -2343,6 +2373,7 @@ void Clay__InitializeEphemeralMemory(Clay_Context* context) {
 
     context->layoutElementIdStrings = Clay__StringArray_Allocate_Arena(maxElementCount, arena);
     context->wrappedTextLines = Clay__WrappedTextLineArray_Allocate_Arena(maxElementCount, arena);
+    context->wrapLines = Clay__WrapLineArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementTreeNodeArray1 = Clay__LayoutElementTreeNodeArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementTreeRoots = Clay__LayoutElementTreeRootArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementChildren = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);
@@ -2393,6 +2424,30 @@ float Clay__GrowWeight(Clay_SizingAxis sizing) {
     return sizing.growWeight;
 }
 
+float Clay__RowGap(const Clay_LayoutConfig *layoutConfig) {
+    if (layoutConfig->rowGap == 0 && layoutConfig->columnGap == 0)
+        return (float)layoutConfig->childGap;
+    return (float)layoutConfig->rowGap;
+}
+
+float Clay__ColumnGap(const Clay_LayoutConfig *layoutConfig) {
+    if (layoutConfig->rowGap == 0 && layoutConfig->columnGap == 0)
+        return (float)layoutConfig->childGap;
+    return (float)layoutConfig->columnGap;
+}
+
+float Clay__MainAxisGap(const Clay_LayoutConfig *layoutConfig) {
+    return layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT
+               ? Clay__ColumnGap(layoutConfig)
+               : Clay__RowGap(layoutConfig);
+}
+
+float Clay__CrossAxisGap(const Clay_LayoutConfig *layoutConfig) {
+    return layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT
+               ? Clay__RowGap(layoutConfig)
+               : Clay__ColumnGap(layoutConfig);
+}
+
 void Clay__CalculateChildDistribution(Clay_ChildDistribution distribution,
                                       int32_t childCount, float freeSpace,
                                       float *leadingSpace, float *distributedGap) {
@@ -2424,6 +2479,234 @@ void Clay__CalculateChildDistribution(Clay_ChildDistribution distribution,
         default:
             break;
     }
+}
+
+Clay_SizingAxis Clay__GetElementSizing(Clay_LayoutElement *element, bool xAxis);
+
+void Clay__BuildWrapLines(Clay_LayoutElement *parent, bool xAxis, float availableMain) {
+    Clay_Context *context = Clay_GetCurrentContext();
+    Clay__WrapLineArray *lines = &context->wrapLines;
+    lines->length = 0;
+    const float mainGap = Clay__MainAxisGap(&parent->config.layout);
+    availableMain = CLAY__MAX(0.0f, availableMain);
+
+    for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+        Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
+            &context->layoutElements, parent->children.elements[childIndex]);
+        child->wrapLine = 0;
+        if (child->exiting)
+            continue;
+
+        const float childMain = xAxis ? child->dimensions.width : child->dimensions.height;
+        const int32_t currentLineIndex = lines->length - 1;
+        const float currentLineGap = currentLineIndex >= 0 &&
+                                             Clay__WrapLineArray_Get(lines, currentLineIndex)->childCount > 0
+                                         ? mainGap
+                                         : 0.0f;
+        if (currentLineIndex < 0 ||
+            (Clay__WrapLineArray_Get(lines, currentLineIndex)->childCount > 0 &&
+             Clay__WrapLineArray_Get(lines, currentLineIndex)->mainSize + currentLineGap + childMain >
+                 availableMain)) {
+            Clay__WrapLineArray_Add(lines, CLAY__INIT(Clay__WrapLine) {});
+        }
+
+        const int32_t lineIndex = lines->length - 1;
+        Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, lineIndex);
+        const float gap = line->childCount > 0 ? mainGap : 0.0f;
+        child->wrapLine = lineIndex;
+        line->mainSize += gap + childMain;
+        line->crossSize = CLAY__MAX(line->crossSize,
+                                    xAxis ? child->dimensions.height : child->dimensions.width);
+        if (xAxis) {
+            const float childBaseline = child->hasBaseline ? child->baseline : child->dimensions.height;
+            line->baseline = CLAY__MAX(line->baseline, childBaseline);
+        }
+        line->childCount++;
+    }
+}
+
+void Clay__DistributeWrappedGrow(Clay_LayoutElement *parent, bool xAxis,
+                                  float availableMain) {
+    Clay_Context *context = Clay_GetCurrentContext();
+    Clay__WrapLineArray *lines = &context->wrapLines;
+    const float mainGap = Clay__MainAxisGap(&parent->config.layout);
+    availableMain = CLAY__MAX(0.0f, availableMain);
+
+    for (int32_t lineIndex = 0; lineIndex < lines->length; ++lineIndex) {
+        Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, lineIndex);
+        float remaining = CLAY__MAX(0.0f, availableMain - line->mainSize);
+        while (remaining > CLAY__EPSILON) {
+            double totalWeight = 0.0;
+            int32_t activeCount = 0;
+            for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+                Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
+                    &context->layoutElements, parent->children.elements[childIndex]);
+                if (child->exiting || child->wrapLine != lineIndex)
+                    continue;
+                Clay_SizingAxis sizing = Clay__GetElementSizing(child, xAxis);
+                float childSize = xAxis ? child->dimensions.width : child->dimensions.height;
+                if (sizing.type == CLAY__SIZING_TYPE_GROW &&
+                    sizing.size.minMax.max - childSize > CLAY__EPSILON) {
+                    totalWeight += (double)Clay__GrowWeight(sizing);
+                    activeCount++;
+                }
+            }
+            if (activeCount == 0 || totalWeight <= 0.0)
+                break;
+
+            float distributed = 0.0f;
+            for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+                Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
+                    &context->layoutElements, parent->children.elements[childIndex]);
+                if (child->exiting || child->wrapLine != lineIndex)
+                    continue;
+                Clay_SizingAxis sizing = Clay__GetElementSizing(child, xAxis);
+                float *childSize = xAxis ? &child->dimensions.width : &child->dimensions.height;
+                const float available = sizing.size.minMax.max - *childSize;
+                if (sizing.type != CLAY__SIZING_TYPE_GROW || available <= CLAY__EPSILON)
+                    continue;
+                const float allocation = remaining *
+                    (float)((double)Clay__GrowWeight(sizing) / totalWeight);
+                const float delta = CLAY__MIN(allocation, available);
+                if (delta > 0.0f) {
+                    *childSize += delta;
+                    distributed += delta;
+                }
+            }
+            if (distributed <= CLAY__EPSILON)
+                break;
+            line->mainSize += distributed;
+            remaining -= distributed;
+        }
+
+        line->crossSize = 0.0f;
+        line->baseline = 0.0f;
+        line->childCount = 0;
+        for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+            Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
+                &context->layoutElements, parent->children.elements[childIndex]);
+            if (child->exiting || child->wrapLine != lineIndex)
+                continue;
+            const float childCross = xAxis ? child->dimensions.height : child->dimensions.width;
+            line->crossSize = CLAY__MAX(line->crossSize, childCross);
+            if (xAxis) {
+                const float childBaseline = child->hasBaseline ? child->baseline : child->dimensions.height;
+                line->baseline = CLAY__MAX(line->baseline, childBaseline);
+            }
+            line->childCount++;
+        }
+        line->mainSize = 0.0f;
+        int32_t mainChildCount = 0;
+        for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+            Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
+                &context->layoutElements, parent->children.elements[childIndex]);
+            if (child->exiting || child->wrapLine != lineIndex)
+                continue;
+            if (mainChildCount > 0)
+                line->mainSize += mainGap;
+            line->mainSize += xAxis ? child->dimensions.width : child->dimensions.height;
+            mainChildCount++;
+        }
+    }
+}
+
+void Clay__CollectWrapLines(Clay_LayoutElement *parent, bool xAxis) {
+    Clay_Context *context = Clay_GetCurrentContext();
+    Clay__WrapLineArray *lines = &context->wrapLines;
+    lines->length = 0;
+    const float mainGap = Clay__MainAxisGap(&parent->config.layout);
+    for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+        Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
+            &context->layoutElements, parent->children.elements[childIndex]);
+        if (child->exiting)
+            continue;
+        while (lines->length <= child->wrapLine)
+            Clay__WrapLineArray_Add(lines, CLAY__INIT(Clay__WrapLine) {});
+        Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, child->wrapLine);
+        if (line->childCount > 0)
+            line->mainSize += mainGap;
+        line->mainSize += xAxis ? child->dimensions.width : child->dimensions.height;
+        line->crossSize = CLAY__MAX(line->crossSize,
+                                    xAxis ? child->dimensions.height : child->dimensions.width);
+        if (xAxis) {
+            const float childBaseline = child->hasBaseline ? child->baseline : child->dimensions.height;
+            line->baseline = CLAY__MAX(line->baseline, childBaseline);
+        }
+        line->childCount++;
+    }
+}
+
+void Clay__PrepareWrapLines(Clay_LayoutElement *parent, bool xAxis) {
+    Clay_Context *context = Clay_GetCurrentContext();
+    Clay__WrapLineArray *lines = &context->wrapLines;
+    const Clay_LayoutConfig *layoutConfig = &parent->config.layout;
+    const float mainAvailable = xAxis
+                                    ? parent->dimensions.width - layoutConfig->padding.left -
+                                          layoutConfig->padding.right
+                                    : parent->dimensions.height - layoutConfig->padding.top -
+                                          layoutConfig->padding.bottom;
+    const float crossGap = Clay__CrossAxisGap(layoutConfig);
+    float totalCrossSize = 0.0f;
+    for (int32_t lineIndex = 0; lineIndex < lines->length; ++lineIndex) {
+        Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, lineIndex);
+        const float freeSpace = CLAY__MAX(0.0f, mainAvailable - line->mainSize);
+        Clay__CalculateChildDistribution(layoutConfig->childDistribution, line->childCount,
+                                         freeSpace, &line->leadingSpace,
+                                         &line->distributedGap);
+        totalCrossSize += line->crossSize;
+        if (lineIndex + 1 < lines->length)
+            totalCrossSize += crossGap;
+    }
+    const float crossAvailable = xAxis
+                                     ? parent->dimensions.height - layoutConfig->padding.top -
+                                           layoutConfig->padding.bottom
+                                     : parent->dimensions.width - layoutConfig->padding.left -
+                                           layoutConfig->padding.right;
+    const float crossFreeSpace = CLAY__MAX(0.0f, crossAvailable - totalCrossSize);
+    float crossLeadingSpace = 0.0f;
+    const bool centerCrossAxis = xAxis
+                                     ? layoutConfig->childAlignment.y == CLAY_ALIGN_Y_CENTER
+                                     : layoutConfig->childAlignment.x == CLAY_ALIGN_X_CENTER;
+    const bool endCrossAxis = xAxis
+                                  ? layoutConfig->childAlignment.y == CLAY_ALIGN_Y_BOTTOM
+                                  : layoutConfig->childAlignment.x == CLAY_ALIGN_X_RIGHT;
+    if (centerCrossAxis)
+        crossLeadingSpace = crossFreeSpace / 2.0f;
+    else if (endCrossAxis)
+        crossLeadingSpace = crossFreeSpace;
+
+    float crossOffset = crossLeadingSpace;
+    for (int32_t lineIndex = 0; lineIndex < lines->length; ++lineIndex) {
+        Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, lineIndex);
+        line->crossOffset = crossOffset;
+        crossOffset += line->crossSize;
+        if (lineIndex + 1 < lines->length)
+            crossOffset += crossGap;
+    }
+}
+
+void Clay__UpdateWrappedCrossSize(Clay_LayoutElement *element, bool xAxis) {
+    Clay_LayoutConfig *layoutConfig = &element->config.layout;
+    if (layoutConfig->wrapMode != CLAY_WRAP_WRAP ||
+        (xAxis && layoutConfig->layoutDirection != CLAY_LEFT_TO_RIGHT) ||
+        (!xAxis && layoutConfig->layoutDirection != CLAY_TOP_TO_BOTTOM))
+        return;
+    Clay_SizingAxis crossSizing = xAxis ? layoutConfig->sizing.height : layoutConfig->sizing.width;
+    if (crossSizing.type == CLAY__SIZING_TYPE_GROW ||
+        crossSizing.type == CLAY__SIZING_TYPE_PERCENT)
+        return;
+    Clay__CollectWrapLines(element, xAxis);
+    float crossSize = xAxis ? (float)(layoutConfig->padding.top + layoutConfig->padding.bottom)
+                            : (float)(layoutConfig->padding.left + layoutConfig->padding.right);
+    for (int32_t lineIndex = 0; lineIndex < Clay_GetCurrentContext()->wrapLines.length;
+         ++lineIndex) {
+        if (lineIndex > 0)
+            crossSize += Clay__CrossAxisGap(layoutConfig);
+        crossSize += Clay__WrapLineArray_Get(&Clay_GetCurrentContext()->wrapLines, lineIndex)->crossSize;
+    }
+    float *dimension = xAxis ? &element->dimensions.height : &element->dimensions.width;
+    *dimension = CLAY__MIN(CLAY__MAX(crossSize, crossSizing.size.minMax.min),
+                           crossSizing.size.minMax.max);
 }
 
 Clay_SizingAxis Clay__GetElementSizing(Clay_LayoutElement* element, bool xAxis) {
@@ -2494,7 +2777,7 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
             float innerContentSize = 0, totalPaddingAndChildGaps = parentPadding;
             bool sizingAlongAxis = (xAxis && parentLayoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) || (!xAxis && parentLayoutConfig->layoutDirection == CLAY_TOP_TO_BOTTOM);
             resizableContainerBuffer.length = 0;
-            float parentChildGap = parentLayoutConfig->childGap;
+            float parentChildGap = Clay__MainAxisGap(parentLayoutConfig);
             bool isFirstChild = true;
 
             for (int32_t childOffset = 0; childOffset < parent->children.length; childOffset++) {
@@ -2557,6 +2840,12 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                     }
                     Clay__UpdateAspectRatioBox(childElement);
                 }
+            }
+
+            if (sizingAlongAxis && parentLayoutConfig->wrapMode == CLAY_WRAP_WRAP) {
+                Clay__BuildWrapLines(parent, xAxis, parentSize - parentPadding);
+                Clay__DistributeWrappedGrow(parent, xAxis, parentSize - parentPadding);
+                continue;
             }
 
             if (sizingAlongAxis) {
@@ -2901,10 +3190,14 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         Clay_LayoutConfig *layoutConfig = &currentElement->config.layout;
         if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
             // Resize any parent containers that have grown in height along their non layout axis
-            for (int32_t j = 0; j < currentElement->children.length; ++j) {
-                Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[j]);
-                float childHeightWithPadding = CLAY__MAX(childElement->dimensions.height + layoutConfig->padding.top + layoutConfig->padding.bottom, currentElement->dimensions.height);
-                currentElement->dimensions.height = CLAY__MIN(CLAY__MAX(childHeightWithPadding, layoutConfig->sizing.height.size.minMax.min), layoutConfig->sizing.height.size.minMax.max);
+            if (layoutConfig->wrapMode == CLAY_WRAP_WRAP) {
+                Clay__UpdateWrappedCrossSize(currentElement, true);
+            } else {
+                for (int32_t j = 0; j < currentElement->children.length; ++j) {
+                    Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[j]);
+                    float childHeightWithPadding = CLAY__MAX(childElement->dimensions.height + layoutConfig->padding.top + layoutConfig->padding.bottom, currentElement->dimensions.height);
+                    currentElement->dimensions.height = CLAY__MIN(CLAY__MAX(childHeightWithPadding, layoutConfig->sizing.height.size.minMax.min), layoutConfig->sizing.height.size.minMax.max);
+                }
             }
         } else if (layoutConfig->layoutDirection == CLAY_TOP_TO_BOTTOM) {
             // Resizing along the layout axis
@@ -2913,7 +3206,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[j]);
                 contentHeight += childElement->dimensions.height;
             }
-            contentHeight += (float)(CLAY__MAX(currentElement->children.length - 1, 0) * layoutConfig->childGap);
+            contentHeight += (float)(CLAY__MAX(currentElement->children.length - 1, 0) *
+                                    Clay__MainAxisGap(layoutConfig));
             currentElement->dimensions.height = CLAY__MIN(CLAY__MAX(contentHeight, layoutConfig->sizing.height.size.minMax.min), layoutConfig->sizing.height.size.minMax.max);
         }
     }
@@ -2925,6 +3219,17 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
     for (int32_t i = 0; i < aspectRatioElements.length; ++i) {
         Clay_LayoutElement* aspectElement = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&aspectRatioElements, i));
         aspectElement->dimensions.width = aspectElement->config.aspectRatio.aspectRatio * aspectElement->dimensions.height;
+    }
+
+    // Vertical wrapped flows determine their cross-axis width after Y sizing.
+    // Walk backwards so nested column flows settle before their parents.
+    for (int32_t elementIndex = context->layoutElements.length - 1; elementIndex >= 0;
+         --elementIndex) {
+        Clay_LayoutElement *element =
+            Clay_LayoutElementArray_Get(&context->layoutElements, elementIndex);
+        if (element->isTextElement || element->config.layout.layoutDirection != CLAY_TOP_TO_BOTTOM)
+            continue;
+        Clay__UpdateWrappedCrossSize(element, false);
     }
 
     // A container with one measurable child inherits that child's baseline.
@@ -3132,7 +3437,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                         };
                         Clay__AddRenderCommand(renderCommand);
                         if (borderConfig->width.betweenChildren > 0 && borderConfig->color.a > 0) {
-                            float halfGap = layoutConfig->childGap / 2;
+                            float halfGap = Clay__MainAxisGap(layoutConfig) / 2;
                             float halfWidth = borderConfig->width.betweenChildren / 2;
                             Clay_Vector2 borderOffset = { (float)layoutConfig->padding.left - halfGap, (float)layoutConfig->padding.top - halfGap };
                             if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
@@ -3149,7 +3454,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                                                 .commandType = CLAY_RENDER_COMMAND_TYPE_RECTANGLE,
                                         });
                                     }
-                                    borderOffset.x += (childElement->dimensions.width + (float)layoutConfig->childGap);
+                                    borderOffset.x += (childElement->dimensions.width + Clay__MainAxisGap(layoutConfig));
                                 }
                             } else {
                                 for (int32_t i = 0; i < currentElement->children.length; ++i) {
@@ -3165,7 +3470,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                                                 .commandType = CLAY_RENDER_COMMAND_TYPE_RECTANGLE,
                                         });
                                     }
-                                    borderOffset.y += (childElement->dimensions.height + (float)layoutConfig->childGap);
+                                    borderOffset.y += (childElement->dimensions.height + Clay__MainAxisGap(layoutConfig));
                                 }
                             }
                         }
@@ -3385,7 +3690,31 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             // Main-axis free-space distribution
             Clay_Dimensions contentSizeCurrent = {};
             float distributionGap = 0.0f;
-            if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
+            const bool wrapped = layoutConfig->wrapMode == CLAY_WRAP_WRAP;
+            if (wrapped) {
+                const bool xAxis = layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT;
+                Clay__CollectWrapLines(currentElement, xAxis);
+                Clay__PrepareWrapLines(currentElement, xAxis);
+                for (int32_t lineIndex = 0; lineIndex < context->wrapLines.length;
+                     ++lineIndex) {
+                    Clay__WrapLine *line = Clay__WrapLineArray_Get(&context->wrapLines, lineIndex);
+                    if (xAxis) {
+                        contentSizeCurrent.width = CLAY__MAX(contentSizeCurrent.width,
+                                                             line->mainSize);
+                        contentSizeCurrent.height += line->crossSize;
+                    } else {
+                        contentSizeCurrent.width += line->crossSize;
+                        contentSizeCurrent.height = CLAY__MAX(contentSizeCurrent.height,
+                                                              line->mainSize);
+                    }
+                    if (lineIndex + 1 < context->wrapLines.length) {
+                        if (xAxis)
+                            contentSizeCurrent.height += Clay__CrossAxisGap(layoutConfig);
+                        else
+                            contentSizeCurrent.width += Clay__CrossAxisGap(layoutConfig);
+                    }
+                }
+            } else if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
                 int32_t activeChildCount = 0;
                 for (int32_t i = 0; i < currentElement->children.length; ++i) {
                     Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[i]);
@@ -3394,7 +3723,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     contentSizeCurrent.width += childElement->dimensions.width;
                     contentSizeCurrent.height = CLAY__MAX(contentSizeCurrent.height, childElement->dimensions.height);
                 }
-                contentSizeCurrent.width += (float)(CLAY__MAX(activeChildCount - 1, 0) * layoutConfig->childGap);
+                contentSizeCurrent.width +=
+                    (float)CLAY__MAX(activeChildCount - 1, 0) * Clay__MainAxisGap(layoutConfig);
                 float extraSpace = currentElement->dimensions.width - (float)(layoutConfig->padding.left + layoutConfig->padding.right) - contentSizeCurrent.width;
                 extraSpace = CLAY__MAX(0, extraSpace);
                 Clay__CalculateChildDistribution(layoutConfig->childDistribution,
@@ -3410,7 +3740,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     contentSizeCurrent.width = CLAY__MAX(contentSizeCurrent.width, childElement->dimensions.width);
                     contentSizeCurrent.height += childElement->dimensions.height;
                 }
-                contentSizeCurrent.height += (float)(CLAY__MAX(activeChildCount - 1, 0) * layoutConfig->childGap);
+                contentSizeCurrent.height +=
+                    (float)CLAY__MAX(activeChildCount - 1, 0) * Clay__MainAxisGap(layoutConfig);
                 float extraSpace = currentElement->dimensions.height - (float)(layoutConfig->padding.top + layoutConfig->padding.bottom) - contentSizeCurrent.height;
                 extraSpace = CLAY__MAX(0, extraSpace);
                 Clay__CalculateChildDistribution(layoutConfig->childDistribution,
@@ -3424,7 +3755,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             }
 
             // Add children to the DFS buffer
-            const float childGap = (float)layoutConfig->childGap + distributionGap;
+            const float childGap = Clay__MainAxisGap(layoutConfig) + distributionGap;
             float baseline = 0.0f;
             if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT &&
                 layoutConfig->childAlignment.y == CLAY_ALIGN_Y_BASELINE) {
@@ -3438,12 +3769,65 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     baseline = CLAY__MAX(baseline, childBaseline);
                 }
             }
+            int32_t wrapLineIndex = -1;
+            float wrapMainOffset = 0.0f;
             dfsBuffer.length += currentElement->children.length;
             for (int32_t i = 0; i < currentElement->children.length; ++i) {
                 Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[i]);
                 Clay_LayoutElementHashMapItem* childMapItem = Clay__GetHashMapItem(childElement->id);
                 // Alignment along non layout axis
-                if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
+                if (wrapped && !childElement->exiting) {
+                    const bool xAxis = layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT;
+                    Clay__WrapLine *line = Clay__WrapLineArray_Get(&context->wrapLines,
+                                                                    childElement->wrapLine);
+                    if (childElement->wrapLine != wrapLineIndex) {
+                        wrapLineIndex = childElement->wrapLine;
+                        wrapMainOffset = (xAxis ? (float)layoutConfig->padding.left
+                                                : (float)layoutConfig->padding.top) +
+                                         line->leadingSpace;
+                    }
+                    if (xAxis) {
+                        currentElementTreeNode->nextChildOffset.x = wrapMainOffset;
+                        currentElementTreeNode->nextChildOffset.y =
+                            (float)layoutConfig->padding.top + line->crossOffset;
+                        const float whiteSpaceAroundChild =
+                            line->crossSize - childElement->dimensions.height;
+                        switch (layoutConfig->childAlignment.y) {
+                            case CLAY_ALIGN_Y_TOP:
+                                break;
+                            case CLAY_ALIGN_Y_CENTER:
+                                currentElementTreeNode->nextChildOffset.y +=
+                                    whiteSpaceAroundChild / 2.0f;
+                                break;
+                            case CLAY_ALIGN_Y_BOTTOM:
+                                currentElementTreeNode->nextChildOffset.y += whiteSpaceAroundChild;
+                                break;
+                            case CLAY_ALIGN_Y_BASELINE:
+                                currentElementTreeNode->nextChildOffset.y +=
+                                    line->baseline -
+                                    (childElement->hasBaseline ? childElement->baseline
+                                                                : childElement->dimensions.height);
+                                break;
+                        }
+                    } else {
+                        currentElementTreeNode->nextChildOffset.x =
+                            (float)layoutConfig->padding.left + line->crossOffset;
+                        currentElementTreeNode->nextChildOffset.y = wrapMainOffset;
+                        const float whiteSpaceAroundChild =
+                            line->crossSize - childElement->dimensions.width;
+                        switch (layoutConfig->childAlignment.x) {
+                            case CLAY_ALIGN_X_LEFT:
+                                break;
+                            case CLAY_ALIGN_X_CENTER:
+                                currentElementTreeNode->nextChildOffset.x +=
+                                    whiteSpaceAroundChild / 2.0f;
+                                break;
+                            case CLAY_ALIGN_X_RIGHT:
+                                currentElementTreeNode->nextChildOffset.x += whiteSpaceAroundChild;
+                                break;
+                        }
+                    }
+                } else if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
                     currentElementTreeNode->nextChildOffset.y = currentElement->config.layout.padding.top;
                     float whiteSpaceAroundChild = currentElement->dimensions.height - (float)(layoutConfig->padding.top + layoutConfig->padding.bottom) - childElement->dimensions.height;
                     switch (layoutConfig->childAlignment.y) {
@@ -3481,7 +3865,18 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
 
                 // Update parent offsets
                 if (!childElement->exiting) {
-                    if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
+                    if (wrapped) {
+                        if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT)
+                            wrapMainOffset += childElement->dimensions.width +
+                                              Clay__MainAxisGap(layoutConfig) +
+                                              Clay__WrapLineArray_Get(&context->wrapLines,
+                                                                      childElement->wrapLine)->distributedGap;
+                        else
+                            wrapMainOffset += childElement->dimensions.height +
+                                              Clay__MainAxisGap(layoutConfig) +
+                                              Clay__WrapLineArray_Get(&context->wrapLines,
+                                                                      childElement->wrapLine)->distributedGap;
+                    } else if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
                         currentElementTreeNode->nextChildOffset.x += childElement->dimensions.width + childGap;
                     } else {
                         currentElementTreeNode->nextChildOffset.y += childElement->dimensions.height + childGap;
