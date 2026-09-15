@@ -67,13 +67,15 @@
 
 #define CLAY_PADDING_ALL(padding) CLAY__CONFIG_WRAPPER(Clay_Padding, { padding, padding, padding, padding })
 
-#define CLAY_SIZING_FIT(...) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { __VA_ARGS__ } }, .type = CLAY__SIZING_TYPE_FIT })
+#define CLAY_SIZING_FIT(...) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { __VA_ARGS__ } }, .growWeight = 1.0f, .type = CLAY__SIZING_TYPE_FIT })
 
-#define CLAY_SIZING_GROW(...) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { __VA_ARGS__ } }, .type = CLAY__SIZING_TYPE_GROW })
+#define CLAY_SIZING_GROW(...) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { __VA_ARGS__ } }, .growWeight = 1.0f, .type = CLAY__SIZING_TYPE_GROW })
 
-#define CLAY_SIZING_FIXED(fixedSize) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { fixedSize, fixedSize } }, .type = CLAY__SIZING_TYPE_FIXED })
+#define CLAY_SIZING_GROW_WEIGHTED(growWeight, ...) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { __VA_ARGS__ } }, .growWeight = (growWeight), .type = CLAY__SIZING_TYPE_GROW })
 
-#define CLAY_SIZING_PERCENT(percentOfParent) (CLAY__INIT(Clay_SizingAxis) { .size = { .percent = (percentOfParent) }, .type = CLAY__SIZING_TYPE_PERCENT })
+#define CLAY_SIZING_FIXED(fixedSize) (CLAY__INIT(Clay_SizingAxis) { .size = { .minMax = { fixedSize, fixedSize } }, .growWeight = 1.0f, .type = CLAY__SIZING_TYPE_FIXED })
+
+#define CLAY_SIZING_PERCENT(percentOfParent) (CLAY__INIT(Clay_SizingAxis) { .size = { .percent = (percentOfParent) }, .growWeight = 1.0f, .type = CLAY__SIZING_TYPE_PERCENT })
 
 // Note: If a compile error led you here, you might be trying to use CLAY_ID with something other than a string literal. To construct an ID with a dynamic string, use CLAY_SID instead.
 #define CLAY_ID(label) CLAY_SID(CLAY_STRING(label))
@@ -327,6 +329,9 @@ typedef struct Clay_SizingAxis {
         Clay_SizingMinMax minMax; // Controls the minimum and maximum size in pixels that this element is allowed to grow or shrink to, overriding sizing types such as FIT or GROW.
         float percent; // Expects 0-1 range. Clamps the axis size to a percent of the parent container's axis size minus padding and child gaps.
     } size;
+    // Relative share of extra space for GROW elements. Non-positive and
+    // non-finite values are normalized to 1.0 by Clay's layout algorithm.
+    float growWeight;
     Clay__SizingType type; // Controls how the element takes up space inside its parent container.
 } Clay_SizingAxis;
 
@@ -2346,6 +2351,16 @@ bool Clay__FloatEqual(float left, float right) {
     return subtracted < CLAY__EPSILON && subtracted > -CLAY__EPSILON;
 }
 
+float Clay__GrowWeight(Clay_SizingAxis sizing) {
+    // Keep the core deterministic even when a caller constructs a sizing axis
+    // directly instead of using one of the sizing macros.
+    if (!(sizing.growWeight > 0.0f) || sizing.growWeight != sizing.growWeight ||
+        sizing.growWeight >= CLAY__MAXFLOAT / 1024.0f) {
+        return 1.0f;
+    }
+    return sizing.growWeight;
+}
+
 Clay_SizingAxis Clay__GetElementSizing(Clay_LayoutElement* element, bool xAxis) {
     if (element->isTextElement) {
         return CLAY__INIT(Clay_SizingAxis) {};
@@ -2533,40 +2548,51 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                         }
                     }
                     while (sizeToDistribute > CLAY__EPSILON && resizableContainerBuffer.length > 0) {
-                        float smallest = CLAY__MAXFLOAT;
-                        float secondSmallest = CLAY__MAXFLOAT;
-                        float widthToAdd = sizeToDistribute;
-                        for (int childIndex = 0; childIndex < resizableContainerBuffer.length; childIndex++) {
-                            Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&resizableContainerBuffer, childIndex));
-                            float childSize = xAxis ? child->dimensions.width : child->dimensions.height;
-                            if (Clay__FloatEqual(childSize, smallest)) { continue; }
-                            if (childSize < smallest) {
-                                secondSmallest = smallest;
-                                smallest = childSize;
-                            }
-                            if (childSize > smallest) {
-                                secondSmallest = CLAY__MIN(secondSmallest, childSize);
-                                widthToAdd = secondSmallest - smallest;
-                            }
-                        }
-
-                        widthToAdd = CLAY__MIN(widthToAdd, sizeToDistribute / resizableContainerBuffer.length);
-
+                        double totalGrowWeight = 0.0;
+                        int activeContainerCount = 0;
                         for (int childIndex = 0; childIndex < resizableContainerBuffer.length; childIndex++) {
                             Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&resizableContainerBuffer, childIndex));
                             float *childSize = xAxis ? &child->dimensions.width : &child->dimensions.height;
                             Clay_SizingAxis childSizing = Clay__GetElementSizing(child, xAxis);
                             float maxSize = childSizing.size.minMax.max;
-                            float previousWidth = *childSize;
-                            if (Clay__FloatEqual(*childSize, smallest)) {
-                                *childSize += widthToAdd;
-                                if (*childSize >= maxSize) {
-                                    *childSize = maxSize;
-                                    Clay__int32_tArray_RemoveSwapback(&resizableContainerBuffer, childIndex--);
-                                }
-                                sizeToDistribute -= (*childSize - previousWidth);
+                            if (maxSize - *childSize > CLAY__EPSILON) {
+                                totalGrowWeight += (double)Clay__GrowWeight(childSizing);
+                                activeContainerCount++;
                             }
                         }
+
+                        if (activeContainerCount == 0 || totalGrowWeight <= 0.0)
+                            break;
+
+                        float distributed = 0.0f;
+                        for (int childIndex = 0; childIndex < resizableContainerBuffer.length; childIndex++) {
+                            Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&resizableContainerBuffer, childIndex));
+                            float *childSize = xAxis ? &child->dimensions.width : &child->dimensions.height;
+                            Clay_SizingAxis childSizing = Clay__GetElementSizing(child, xAxis);
+                            float maxSize = childSizing.size.minMax.max;
+                            float available = maxSize - *childSize;
+                            if (available <= CLAY__EPSILON)
+                                continue;
+                            float allocation = sizeToDistribute *
+                                (float)((double)Clay__GrowWeight(childSizing) / totalGrowWeight);
+                            float delta = CLAY__MIN(allocation, available);
+                            if (delta > 0.0f) {
+                                *childSize += delta;
+                                distributed += delta;
+                            }
+                        }
+
+                        for (int childIndex = resizableContainerBuffer.length - 1; childIndex >= 0; childIndex--) {
+                            Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&resizableContainerBuffer, childIndex));
+                            float childSize = xAxis ? child->dimensions.width : child->dimensions.height;
+                            float maxSize = Clay__GetElementSizing(child, xAxis).size.minMax.max;
+                            if (maxSize - childSize <= CLAY__EPSILON)
+                                Clay__int32_tArray_RemoveSwapback(&resizableContainerBuffer, childIndex);
+                        }
+
+                        if (distributed <= CLAY__EPSILON)
+                            break;
+                        sizeToDistribute -= distributed;
                     }
                 }
             // Sizing along the non layout axis ("off axis")
