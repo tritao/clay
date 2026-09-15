@@ -1321,7 +1321,7 @@ Clay_LayoutConfig {
     uint16_t childGap;
     Clay_ChildAlignment childAlignment {
         .x = CLAY_ALIGN_X_LEFT (default) | CLAY_ALIGN_X_CENTER | CLAY_ALIGN_X_RIGHT;
-        .y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM;
+        .y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM | CLAY_ALIGN_Y_BASELINE;
     };
     Clay_ChildDistribution childDistribution {
         CLAY_DISTRIBUTE_START (default) | CLAY_DISTRIBUTE_CENTER | CLAY_DISTRIBUTE_END |
@@ -1375,8 +1375,13 @@ Controls the white-space **between** child elements as they are laid out. When `
 Controls the alignment of children on the cross axis. The main layout axis is controlled by `.childDistribution`. Available options are:
 ```C
 .x = CLAY_ALIGN_X_LEFT (default) | CLAY_ALIGN_X_CENTER | CLAY_ALIGN_X_RIGHT;
-.y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM;
+.y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM | CLAY_ALIGN_Y_BASELINE;
 ```
+
+`CLAY_ALIGN_Y_BASELINE` aligns baseline-capable children in a horizontal row.
+Children without a baseline use their bottom edge as an explicit fallback. A
+container with one measurable child inherits that child's baseline, so styled
+wrappers remain transparent to row alignment.
 
 <img width="1030" alt="Screenshot 2024-08-22 at 11 25 16 AM" src="https://github.com/user-attachments/assets/be61b4a7-db4f-447c-b6d6-b2d4a91fc664">
 
@@ -1385,6 +1390,11 @@ Controls the alignment of children on the cross axis. The main layout axis is co
 **`.childDistribution`** - `Clay_ChildDistribution`
 
 Controls how free space is distributed along the layout direction. `CLAY_DISTRIBUTE_START` places children at the start, `CLAY_DISTRIBUTE_CENTER` centers them as a group, and `CLAY_DISTRIBUTE_END` places them at the end. `CLAY_DISTRIBUTE_SPACE_BETWEEN`, `CLAY_DISTRIBUTE_SPACE_AROUND`, and `CLAY_DISTRIBUTE_SPACE_EVENLY` add free-space gaps between and around children. The configured `childGap` remains in addition to any distributed free space.
+
+External text measurement and paragraph-layout callbacks may return an
+optional first-line baseline measured from the top of the text box. Clay uses
+that metric for baseline alignment and falls back to bottom-edge alignment when
+it is unavailable.
 
 ---
 
