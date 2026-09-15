@@ -1353,6 +1353,8 @@ typedef struct {
     float distributedGap;
     float baseline;
     int32_t childCount;
+    int32_t firstChildOffset;
+    int32_t lastChildOffset;
 } Clay__WrapLine;
 
 CLAY__ARRAY_DEFINE(Clay__WrapLine, Clay__WrapLineArray)
@@ -1365,7 +1367,10 @@ typedef struct {
 
 typedef struct {
     int32_t *elements;
-    uint16_t length;
+    // A layout may intentionally contain more than 65,535 siblings. Keep
+    // this aligned with the rest of Clay's max-element configuration instead
+    // of silently wrapping large application lists.
+    int32_t length;
 } Clay__LayoutElementChildren;
 
 typedef struct Clay_LayoutElement {
@@ -1383,8 +1388,14 @@ typedef struct Clay_LayoutElement {
         };
     };
     uint32_t id;
-    uint16_t floatingChildrenCount;
+    int32_t floatingChildrenCount;
     int32_t wrapLine;
+    // Generic intrinsic measurements are reused when both sizing passes ask
+    // for the same constraints. This keeps a frame-local callback from
+    // becoming an accidental twice-per-element hot path.
+    Clay_MeasureConstraints measureConstraints;
+    Clay_MeasureResult measureResult;
+    bool hasMeasureResult;
     bool isTextElement;
     // True if the element is currently in an exit transition, and is "synthetic"
     // i.e. data was retained from previous frames
@@ -1419,7 +1430,7 @@ typedef struct Clay__TransitionDataInternal {
     Clay_Vector2 oldParentRelativePosition;
     uint32_t elementId;
     uint32_t parentId;
-    uint32_t siblingIndex;
+    int32_t siblingIndex;
     float elapsedTime;
     Clay_TransitionState state;
     bool transitionOut;
@@ -1520,6 +1531,7 @@ struct Clay_Context {
     void *layoutTextUserData;
     void *queryScrollOffsetUserData;
     Clay_Arena internalArena;
+    uint32_t arenaAllocationCount;
     // Layout Elements / Render Commands
     Clay_LayoutElementArray layoutElements;
     Clay_RenderCommandArray renderCommands;
@@ -2575,6 +2587,9 @@ void Clay__BuildWrapLines(Clay_LayoutElement *parent, bool xAxis, float availabl
 
         const int32_t lineIndex = lines->length - 1;
         Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, lineIndex);
+        if (line->childCount == 0)
+            line->firstChildOffset = childIndex;
+        line->lastChildOffset = childIndex;
         const float gap = line->childCount > 0 ? mainGap : 0.0f;
         child->wrapLine = lineIndex;
         line->mainSize += gap + childMain;
@@ -2601,7 +2616,8 @@ void Clay__DistributeWrappedGrow(Clay_LayoutElement *parent, bool xAxis,
         while (remaining > CLAY__EPSILON) {
             double totalWeight = 0.0;
             int32_t activeCount = 0;
-            for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+            for (int32_t childIndex = line->firstChildOffset;
+                 childIndex <= line->lastChildOffset; ++childIndex) {
                 Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
                     &context->layoutElements, parent->children.elements[childIndex]);
                 if (child->exiting || child->wrapLine != lineIndex)
@@ -2618,7 +2634,8 @@ void Clay__DistributeWrappedGrow(Clay_LayoutElement *parent, bool xAxis,
                 break;
 
             float distributed = 0.0f;
-            for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+            for (int32_t childIndex = line->firstChildOffset;
+                 childIndex <= line->lastChildOffset; ++childIndex) {
                 Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
                     &context->layoutElements, parent->children.elements[childIndex]);
                 if (child->exiting || child->wrapLine != lineIndex)
@@ -2645,7 +2662,8 @@ void Clay__DistributeWrappedGrow(Clay_LayoutElement *parent, bool xAxis,
         line->crossSize = 0.0f;
         line->baseline = 0.0f;
         line->childCount = 0;
-        for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+        for (int32_t childIndex = line->firstChildOffset;
+             childIndex <= line->lastChildOffset; ++childIndex) {
             Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
                 &context->layoutElements, parent->children.elements[childIndex]);
             if (child->exiting || child->wrapLine != lineIndex)
@@ -2660,7 +2678,8 @@ void Clay__DistributeWrappedGrow(Clay_LayoutElement *parent, bool xAxis,
         }
         line->mainSize = 0.0f;
         int32_t mainChildCount = 0;
-        for (int32_t childIndex = 0; childIndex < parent->children.length; ++childIndex) {
+        for (int32_t childIndex = line->firstChildOffset;
+             childIndex <= line->lastChildOffset; ++childIndex) {
             Clay_LayoutElement *child = Clay_LayoutElementArray_Get(
                 &context->layoutElements, parent->children.elements[childIndex]);
             if (child->exiting || child->wrapLine != lineIndex)
@@ -2686,6 +2705,9 @@ void Clay__CollectWrapLines(Clay_LayoutElement *parent, bool xAxis) {
         while (lines->length <= child->wrapLine)
             Clay__WrapLineArray_Add(lines, CLAY__INIT(Clay__WrapLine) {});
         Clay__WrapLine *line = Clay__WrapLineArray_Get(lines, child->wrapLine);
+        if (line->childCount == 0)
+            line->firstChildOffset = childIndex;
+        line->lastChildOffset = childIndex;
         if (line->childCount > 0)
             line->mainSize += mainGap;
         line->mainSize += xAxis ? child->dimensions.width : child->dimensions.height;
@@ -2823,6 +2845,12 @@ float Clay__ClampMeasuredElementDimension(float value, float minimum, float maxi
     return CLAY__MIN(CLAY__MAX(value, minimum), maximum);
 }
 
+bool Clay__MeasureConstraintsEqual(Clay_MeasureConstraints left,
+                                   Clay_MeasureConstraints right) {
+    return left.minWidth == right.minWidth && left.maxWidth == right.maxWidth &&
+           left.minHeight == right.minHeight && left.maxHeight == right.maxHeight;
+}
+
 void Clay__ApplyMeasureElement(Clay_LayoutElement *element, Clay_LayoutElement *parent) {
     if (!Clay__MeasureElement || element->isTextElement ||
         !element->config.custom.customData)
@@ -2831,8 +2859,21 @@ void Clay__ApplyMeasureElement(Clay_LayoutElement *element, Clay_LayoutElement *
     Clay_MeasureConstraints constraints =
         Clay__GetMeasureElementConstraints(element, parent);
     Clay_LayoutElementHashMapItem *mapItem = Clay__GetHashMapItem(element->id);
-    Clay_MeasureResult result = Clay__MeasureElement(
-        mapItem->elementId, constraints, context->measureElementUserData);
+    Clay_MeasureResult result;
+    if (element->hasMeasureResult &&
+        Clay__MeasureConstraintsEqual(element->measureConstraints, constraints)) {
+        result = element->measureResult;
+    } else {
+        result = Clay__MeasureElement(
+            mapItem->elementId, constraints, context->measureElementUserData);
+        if (Clay__IsFinite(result.dimensions.width) &&
+            Clay__IsFinite(result.dimensions.height) && result.dimensions.width >= 0.0f &&
+            result.dimensions.height >= 0.0f) {
+            element->measureConstraints = constraints;
+            element->measureResult = result;
+            element->hasMeasureResult = true;
+        }
+    }
     if (!Clay__IsFinite(result.dimensions.width) || !Clay__IsFinite(result.dimensions.height) ||
         result.dimensions.width < 0.0f || result.dimensions.height < 0.0f)
         return;
@@ -4856,6 +4897,9 @@ Clay__WarningArray Clay__WarningArray_Allocate_Arena(int32_t capacity, Clay_Aren
     if (nextAllocOffset + totalSizeBytes <= arena->capacity) {
         array.internalArray = (Clay__Warning*)((uintptr_t)arena->memory + (uintptr_t)nextAllocOffset);
         arena->nextAllocation = nextAllocOffset + totalSizeBytes;
+        Clay_Context *context = Clay_GetCurrentContext();
+        if (context && arena == &context->internalArena)
+            context->arenaAllocationCount++;
     }
     else {
         Clay__currentContext->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
@@ -4881,6 +4925,9 @@ void* Clay__Array_Allocate_Arena(int32_t capacity, uint32_t itemSize, Clay_Arena
     uintptr_t nextAllocOffset = arena->nextAllocation + ((64 - (arena->nextAllocation % 64)) & 63);
     if (nextAllocOffset + totalSizeBytes <= arena->capacity) {
         arena->nextAllocation = nextAllocOffset + totalSizeBytes;
+        Clay_Context *context = Clay_GetCurrentContext();
+        if (context && arena == &context->internalArena)
+            context->arenaAllocationCount++;
         return (void*)((uintptr_t)arena->memory + (uintptr_t)nextAllocOffset);
     }
     else {
@@ -5434,7 +5481,7 @@ Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
                         if (bfsMapItem->generation <= context->generation) {
                             Clay__AddHashMapItem(CLAY__INIT(Clay_ElementId){ layoutElement->id }, layoutElement);
                             int32_t firstChildSlot = context->layoutElementChildren.length;
-                            uint16_t newChildrenLength = layoutElement->children.length;
+                            int32_t newChildrenLength = layoutElement->children.length;
                             for (int j = 0; j < layoutElement->children.length; ++j) {
                                 Clay_LayoutElement* childElement = Clay_LayoutElementArray_GetCheckCapacity(&context->layoutElements, layoutElement->children.elements[j]);
                                 Clay_LayoutElementHashMapItem* childMapItem = Clay__GetHashMapItem(childElement->id);

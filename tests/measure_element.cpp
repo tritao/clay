@@ -57,7 +57,7 @@ int main() {
     Clay_EndLayout(0.0f);
 
     const Clay_ElementData data = Clay_GetElementData(CLAY_ID("custom"));
-    const bool valid = state.calls == 2 && state.id.id == CLAY_ID("custom").id &&
+    const bool valid = state.calls == 1 && state.id.id == CLAY_ID("custom").id &&
                        close_enough(state.constraints.minWidth, 0.0f) &&
                        close_enough(state.constraints.maxWidth, 100.0f) &&
                        close_enough(state.constraints.minHeight, 0.0f) &&
