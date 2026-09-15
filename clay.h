@@ -2468,7 +2468,10 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 Clay_SizingAxis childSizing = Clay__GetElementSizing(childElement, xAxis);
                 float *childSize = xAxis ? &childElement->dimensions.width : &childElement->dimensions.height;
                 if (childSizing.type == CLAY__SIZING_TYPE_PERCENT) {
-                    *childSize = (parentSize - totalPaddingAndChildGaps) * childSizing.size.percent;
+                    // Padding and gaps can consume more space than a small
+                    // parent provides. Percentage sizing must not turn that
+                    // underflow into a negative geometry dimension.
+                    *childSize = CLAY__MAX(0.0f, (parentSize - totalPaddingAndChildGaps) * childSizing.size.percent);
                     if (sizingAlongAxis) {
                         innerContentSize += *childSize;
                     }
