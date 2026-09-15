@@ -14,6 +14,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// Define CLAY_DISABLE_DEBUG when the internal debug view and its controls are
+// not part of the embedding application's feature set.
+
 // SIMD includes on supported platforms
 #if !defined(CLAY_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64))
 #include <emmintrin.h>
@@ -1060,9 +1063,11 @@ CLAY_DLL_EXPORT void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrol
 CLAY_DLL_EXPORT Clay_RenderCommand * Clay_RenderCommandArray_Get(Clay_RenderCommandArray* array, int32_t index);
 // Enables and disables Clay's internal debug tools.
 // This state is retained and does not need to be set each frame.
+#ifndef CLAY_DISABLE_DEBUG
 CLAY_DLL_EXPORT void Clay_SetDebugModeEnabled(bool enabled);
 // Returns true if Clay's internal debug tools are currently enabled.
 CLAY_DLL_EXPORT bool Clay_IsDebugModeEnabled(void);
+#endif
 // Enables and disables visibility culling. By default, Clay will not generate render commands for elements whose bounding box is entirely outside the screen.
 CLAY_DLL_EXPORT void Clay_SetCullingEnabled(bool enabled);
 // Returns the maximum number of UI elements supported by Clay's current configuration.
@@ -1091,8 +1096,10 @@ CLAY_DLL_EXPORT Clay_ElementId Clay__HashString(Clay_String key, uint32_t seed);
 CLAY_DLL_EXPORT Clay_ElementId Clay__HashStringWithOffset(Clay_String key, uint32_t offset, uint32_t seed);
 CLAY_DLL_EXPORT void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig);
 
+#ifndef CLAY_DISABLE_DEBUG
 extern Clay_Color Clay__debugViewHighlightColor;
 extern uint32_t Clay__debugViewWidth;
+#endif
 
 #ifdef __cplusplus
 }
@@ -1329,10 +1336,12 @@ typedef struct { // todo get this struct into a single cache line
     int32_t nextIndex;
     uint32_t generation;
     bool appearedThisFrame;
+#ifndef CLAY_DISABLE_DEBUG
     struct {
         bool collision;
         bool collapsed;
     } debugData;
+#endif
 } Clay_LayoutElementHashMapItem;
 
 CLAY__ARRAY_DEFINE(Clay_LayoutElementHashMapItem, Clay__LayoutElementHashMapItemArray)
@@ -1393,10 +1402,14 @@ struct Clay_Context {
     Clay_Dimensions layoutDimensions;
     Clay_ElementId dynamicElementIndexBaseHash;
     uint32_t dynamicElementIndex;
+#ifndef CLAY_DISABLE_DEBUG
     bool debugModeEnabled;
+#endif
     bool disableCulling;
     bool externalScrollHandlingEnabled;
+#ifndef CLAY_DISABLE_DEBUG
     uint32_t debugSelectedElementId;
+#endif
     uint32_t generation;
     uintptr_t arenaResetOffset;
     void *measureTextUserData;
@@ -1866,7 +1879,9 @@ Clay_LayoutElementHashMapItem* Clay__AddHashMapItem(Clay_ElementId elementId, Cl
                 hashItem->elementId = elementId; // Make sure to copy this across. If the stringId reference has changed, we should update the hash item to use the new one.
                 hashItem->generation = context->generation + 1;
                 hashItem->layoutElement = layoutElement;
+#ifndef CLAY_DISABLE_DEBUG
                 hashItem->debugData.collision = false;
+#endif
                 hashItem->onHoverFunction = NULL;
                 hashItem->hoverFunctionUserData = 0;
             } else { // Multiple collisions this frame - two elements have the same ID
@@ -1874,9 +1889,11 @@ Clay_LayoutElementHashMapItem* Clay__AddHashMapItem(Clay_ElementId elementId, Cl
                     .errorType = CLAY_ERROR_TYPE_DUPLICATE_ID,
                     .errorText = CLAY_STRING("An element with this ID was already previously declared during this layout."),
                     .userData = context->errorHandler.userData });
+#ifndef CLAY_DISABLE_DEBUG
                 if (context->debugModeEnabled) {
                     hashItem->debugData.collision = true;
                 }
+#endif
             }
             return hashItem;
         }
@@ -3333,6 +3350,7 @@ CLAY_DLL_EXPORT Clay_ElementIdArray Clay_GetPointerOverIds(void) {
     return Clay_GetCurrentContext()->pointerOverIds;
 }
 
+#ifndef CLAY_DISABLE_DEBUG
 #pragma region DebugTools
 Clay_Color CLAY__DEBUGVIEW_COLOR_1 = {58, 56, 52, 255};
 Clay_Color CLAY__DEBUGVIEW_COLOR_2 = {62, 60, 58, 255};
@@ -4087,6 +4105,7 @@ void Clay__RenderDebugView(void) {
 
 uint32_t Clay__debugViewWidth = 400;
 Clay_Color Clay__debugViewHighlightColor = { 168, 66, 28, 100 };
+#endif
 
 Clay__WarningArray Clay__WarningArray_Allocate_Arena(int32_t capacity, Clay_Arena *arena) {
     size_t totalSizeBytes = capacity * sizeof(Clay_String);
@@ -4505,9 +4524,11 @@ void Clay_BeginLayout(void) {
     context->dynamicElementIndex = 0;
     // Set up the root container that covers the entire window
     Clay_Dimensions rootDimensions = {context->layoutDimensions.width, context->layoutDimensions.height};
+#ifndef CLAY_DISABLE_DEBUG
     if (context->debugModeEnabled) {
         rootDimensions.width -= (float)Clay__debugViewWidth;
     }
+#endif
     context->booleanWarnings = CLAY__INIT(Clay_BooleanWarnings) CLAY__DEFAULT_STRUCT;
     Clay__OpenElementWithId(CLAY_ID("Clay__RootContainer"));
     Clay__ConfigureOpenElement(CLAY__INIT(Clay_ElementDeclaration) {
@@ -4890,11 +4911,13 @@ Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
                 }
             }
 
+#ifndef CLAY_DISABLE_DEBUG
             if (context->debugModeEnabled) {
                 context->warningsEnabled = false;
                 Clay__RenderDebugView();
                 context->warningsEnabled = true;
             }
+#endif
 
             if (context->booleanWarnings.maxElementsExceeded) {
                 Clay_String message;
@@ -4909,11 +4932,13 @@ Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
                 Clay__CloneElementsWithExitTransition();
             }
         } else {
+#ifndef CLAY_DISABLE_DEBUG
             if (context->debugModeEnabled) {
                 context->warningsEnabled = false;
                 Clay__RenderDebugView();
                 context->warningsEnabled = true;
             }
+#endif
 
             if (context->booleanWarnings.maxElementsExceeded) {
                 Clay_String message;
@@ -5046,6 +5071,7 @@ Clay_ElementData Clay_GetElementData(Clay_ElementId id){
     };
 }
 
+#ifndef CLAY_DISABLE_DEBUG
 CLAY_WASM_EXPORT("Clay_SetDebugModeEnabled")
 void Clay_SetDebugModeEnabled(bool enabled) {
     Clay_Context* context = Clay_GetCurrentContext();
@@ -5057,6 +5083,7 @@ bool Clay_IsDebugModeEnabled(void) {
     Clay_Context* context = Clay_GetCurrentContext();
     return context->debugModeEnabled;
 }
+#endif
 
 CLAY_WASM_EXPORT("Clay_SetCullingEnabled")
 void Clay_SetCullingEnabled(bool enabled) {
