@@ -662,9 +662,10 @@ dimensions are used for `FIT` and `GROW` axes, then clamped to those
 constraints. A valid returned baseline is measured from the element's top
 edge and participates in baseline alignment.
 
-The callback is allowed to be called once per sizing pass, so implementations
-should be cheap or cache by element ID and constraints. Return non-negative,
-finite dimensions; invalid results are ignored.
+Clay reuses a result when both sizing passes request identical constraints, but
+the callback may still run more than once for an element when its constraints
+change during layout. Return non-negative, finite dimensions; invalid results
+are ignored and are not cached.
 
 ---
 
