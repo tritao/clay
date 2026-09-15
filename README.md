@@ -1388,6 +1388,8 @@ Controls how final width and height of element are calculated. The same configur
 
 - `CLAY_SIZING_GROW(float min, float max)` - The element will grow to fill available space in its parent, up to `max`. If `max` is left unspecified, it will default to `FLOAT_MAX`. When elements are compressed to fit into a smaller parent, this element will not shrink below `min`.
 
+- `CLAY_SIZING_GROW_WEIGHTED(float weight, float min, float max)` - Like `CLAY_SIZING_GROW`, but assigns a relative share of the extra space to the element. Equal weights preserve the normal equal-share behavior. Non-positive and non-finite weights are normalized to `1.0`.
+
 - `CLAY_SIZING_FIXED(float fixed)` - The final size will always be exactly the provided `fixed` value. Shorthand for `CLAY_SIZING_FIT(fixed, fixed)`
 
 - `CLAY_SIZING_PERCENT(float percent)` - Final size will be a percentage of parent size, minus padding and child gaps. `percent` is assumed to be a float between `0` and `1`.
