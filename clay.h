@@ -296,6 +296,8 @@ typedef CLAY_PACKED_ENUM {
     CLAY_ALIGN_Y_BOTTOM,
     // Aligns child elements vertically to the center of this element
     CLAY_ALIGN_Y_CENTER,
+    // Aligns child baselines. Children without a baseline align their bottom edge to the baseline.
+    CLAY_ALIGN_Y_BASELINE,
 } Clay_LayoutAlignmentY;
 
 // Controls how the element takes up space inside its parent container.
@@ -451,6 +453,9 @@ typedef struct Clay_TextLayoutResult {
     int32_t lineCount;
     const Clay_TextLayoutLine *lines;
     uint64_t layoutId;
+    // First-line baseline measured from the top of the returned text box.
+    float baseline;
+    bool hasBaseline;
 } Clay_TextLayoutResult;
 
 typedef Clay_TextLayoutResult (*Clay_LayoutTextFunction)(
@@ -462,6 +467,9 @@ typedef Clay_TextLayoutResult (*Clay_LayoutTextFunction)(
 typedef struct Clay_TextIntrinsicDimensions {
     Clay_Dimensions unwrappedDimensions;
     float minWidth;
+    // First-line baseline measured from the top of unwrappedDimensions.
+    float baseline;
+    bool hasBaseline;
 } Clay_TextIntrinsicDimensions;
 
 typedef Clay_TextIntrinsicDimensions (*Clay_MeasureTextIntrinsicFunction)(
@@ -1290,6 +1298,9 @@ typedef struct Clay_LayoutElement {
     Clay__LayoutElementChildren children;
     Clay_Dimensions dimensions;
     Clay_Dimensions minDimensions;
+    // Baseline of measurable content, relative to this element's top edge.
+    float baseline;
+    bool hasBaseline;
     union {
         Clay_ElementDeclaration config;
         struct {
@@ -2195,6 +2206,9 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
             }, &textConfig, context->measureTextIntrinsicUserData);
         preferredDimensions = intrinsic.unwrappedDimensions;
         minWidth = intrinsic.minWidth;
+        textElement->hasBaseline = intrinsic.hasBaseline && intrinsic.baseline > -CLAY__MAXFLOAT &&
+                                   intrinsic.baseline < CLAY__MAXFLOAT;
+        textElement->baseline = textElement->hasBaseline ? intrinsic.baseline : 0.0f;
     } else {
         // Preserve the legacy path when an external paragraph engine does not
         // provide intrinsic metrics.
@@ -2771,6 +2785,10 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 });
                 continue;
             }
+            containerElement->hasBaseline = externalLayout.hasBaseline &&
+                                            externalLayout.baseline > -CLAY__MAXFLOAT &&
+                                            externalLayout.baseline < CLAY__MAXFLOAT;
+            containerElement->baseline = containerElement->hasBaseline ? externalLayout.baseline : 0.0f;
             for (int32_t lineIndex = 0; lineIndex < externalLayout.lineCount; ++lineIndex) {
                 const Clay_TextLayoutLine &line = externalLayout.lines[lineIndex];
                 if (line.line.length < 0 || (line.line.length > 0 && line.line.chars == CLAY__NULL)) {
@@ -2907,6 +2925,60 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
     for (int32_t i = 0; i < aspectRatioElements.length; ++i) {
         Clay_LayoutElement* aspectElement = Clay_LayoutElementArray_Get(&context->layoutElements, Clay__int32_tArray_GetValue(&aspectRatioElements, i));
         aspectElement->dimensions.width = aspectElement->config.aspectRatio.aspectRatio * aspectElement->dimensions.height;
+    }
+
+    // A container with one measurable child inherits that child's baseline.
+    // NativeKit represents text nodes as a styled container around Clay's text
+    // element, so this keeps the wrapper transparent to parent row alignment.
+    for (int32_t elementIndex = context->layoutElements.length - 1; elementIndex >= 0;
+         --elementIndex) {
+        Clay_LayoutElement *element = Clay_LayoutElementArray_Get(&context->layoutElements, elementIndex);
+        if (element->isTextElement || element->hasBaseline || element->children.length != 1)
+            continue;
+        Clay_LayoutElement *child = Clay_LayoutElementArray_Get(&context->layoutElements, element->children.elements[0]);
+        if (!child->hasBaseline)
+            continue;
+
+        Clay_LayoutConfig *layoutConfig = &element->config.layout;
+        float childOffsetY = (float)layoutConfig->padding.top;
+        if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
+            const float whiteSpaceAroundChild = element->dimensions.height -
+                (float)(layoutConfig->padding.top + layoutConfig->padding.bottom) -
+                child->dimensions.height;
+            switch (layoutConfig->childAlignment.y) {
+                case CLAY_ALIGN_Y_CENTER:
+                    childOffsetY += whiteSpaceAroundChild / 2.0f;
+                    break;
+                case CLAY_ALIGN_Y_BOTTOM:
+                    childOffsetY += whiteSpaceAroundChild;
+                    break;
+                case CLAY_ALIGN_Y_TOP:
+                case CLAY_ALIGN_Y_BASELINE:
+                    break;
+            }
+        } else {
+            const float freeSpace = CLAY__MAX(0.0f, element->dimensions.height -
+                                                       (float)(layoutConfig->padding.top +
+                                                               layoutConfig->padding.bottom) -
+                                                       child->dimensions.height);
+            switch (layoutConfig->childDistribution) {
+                case CLAY_DISTRIBUTE_CENTER:
+                    childOffsetY += freeSpace / 2.0f;
+                    break;
+                case CLAY_DISTRIBUTE_END:
+                    childOffsetY += freeSpace;
+                    break;
+                case CLAY_DISTRIBUTE_SPACE_AROUND:
+                case CLAY_DISTRIBUTE_SPACE_EVENLY:
+                    childOffsetY += freeSpace / 2.0f;
+                    break;
+                case CLAY_DISTRIBUTE_START:
+                case CLAY_DISTRIBUTE_SPACE_BETWEEN:
+                    break;
+            }
+        }
+        element->baseline = childOffsetY + child->baseline;
+        element->hasBaseline = true;
     }
 
     // Sort tree roots by z-index
@@ -3353,6 +3425,19 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
 
             // Add children to the DFS buffer
             const float childGap = (float)layoutConfig->childGap + distributionGap;
+            float baseline = 0.0f;
+            if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT &&
+                layoutConfig->childAlignment.y == CLAY_ALIGN_Y_BASELINE) {
+                for (int32_t i = 0; i < currentElement->children.length; ++i) {
+                    Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[i]);
+                    if (childElement->exiting)
+                        continue;
+                    const float childBaseline = childElement->hasBaseline
+                                                    ? childElement->baseline
+                                                    : childElement->dimensions.height;
+                    baseline = CLAY__MAX(baseline, childBaseline);
+                }
+            }
             dfsBuffer.length += currentElement->children.length;
             for (int32_t i = 0; i < currentElement->children.length; ++i) {
                 Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[i]);
@@ -3365,6 +3450,10 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                         case CLAY_ALIGN_Y_TOP: break;
                         case CLAY_ALIGN_Y_CENTER: currentElementTreeNode->nextChildOffset.y += whiteSpaceAroundChild / 2; break;
                         case CLAY_ALIGN_Y_BOTTOM: currentElementTreeNode->nextChildOffset.y += whiteSpaceAroundChild; break;
+                        case CLAY_ALIGN_Y_BASELINE:
+                            currentElementTreeNode->nextChildOffset.y +=
+                                baseline - (childElement->hasBaseline ? childElement->baseline : childElement->dimensions.height);
+                            break;
                     }
                 } else {
                     currentElementTreeNode->nextChildOffset.x = currentElement->config.layout.padding.left;
