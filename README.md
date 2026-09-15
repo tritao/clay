@@ -1323,6 +1323,10 @@ Clay_LayoutConfig {
         .x = CLAY_ALIGN_X_LEFT (default) | CLAY_ALIGN_X_CENTER | CLAY_ALIGN_X_RIGHT;
         .y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM;
     };
+    Clay_ChildDistribution childDistribution {
+        CLAY_DISTRIBUTE_START (default) | CLAY_DISTRIBUTE_CENTER | CLAY_DISTRIBUTE_END |
+        CLAY_DISTRIBUTE_SPACE_BETWEEN | CLAY_DISTRIBUTE_SPACE_AROUND | CLAY_DISTRIBUTE_SPACE_EVENLY;
+    };
     Clay_Sizing sizing { // Recommended to use the provided macros here - see #sizing for more in depth explanation
         .width = CLAY_SIZING_FIT(float min, float max) (default) | CLAY_SIZING_GROW(float min, float max) | CLAY_SIZING_FIXED(float width) | CLAY_SIZING_PERCENT(float percent)
         .height = CLAY_SIZING_FIT(float min, float max) (default) | CLAY_SIZING_GROW(float min, float max) | CLAY_SIZING_FIXED(float height) | CLAY_SIZING_PERCENT(float percent)
@@ -1368,13 +1372,19 @@ Controls the white-space **between** child elements as they are laid out. When `
 
 `CLAY(CLAY_ID("Element"), { .layout = { .childAlignment = { .x = CLAY_ALIGN_X_LEFT, .y = CLAY_ALIGN_Y_CENTER } } })`
 
-Controls the alignment of children relative to the height and width of the parent container. Available options are:
+Controls the alignment of children on the cross axis. The main layout axis is controlled by `.childDistribution`. Available options are:
 ```C
 .x = CLAY_ALIGN_X_LEFT (default) | CLAY_ALIGN_X_CENTER | CLAY_ALIGN_X_RIGHT;
 .y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM;
 ```
 
 <img width="1030" alt="Screenshot 2024-08-22 at 11 25 16 AM" src="https://github.com/user-attachments/assets/be61b4a7-db4f-447c-b6d6-b2d4a91fc664">
+
+---
+
+**`.childDistribution`** - `Clay_ChildDistribution`
+
+Controls how free space is distributed along the layout direction. `CLAY_DISTRIBUTE_START` places children at the start, `CLAY_DISTRIBUTE_CENTER` centers them as a group, and `CLAY_DISTRIBUTE_END` places them at the end. `CLAY_DISTRIBUTE_SPACE_BETWEEN`, `CLAY_DISTRIBUTE_SPACE_AROUND`, and `CLAY_DISTRIBUTE_SPACE_EVENLY` add free-space gaps between and around children. The configured `childGap` remains in addition to any distributed free space.
 
 ---
 
