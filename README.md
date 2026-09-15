@@ -1334,9 +1334,9 @@ Element is subject to [culling](#visibility-culling). Otherwise, a single `Clay_
 Clay_LayoutConfig {
     Clay_LayoutDirection layoutDirection = CLAY_LEFT_TO_RIGHT (default) | CLAY_TOP_TO_BOTTOM;
     Clay_Padding padding {
-        u16 left; u16 right; u16 top; u16 bottom; 
+        Clay_LayoutUnit left; Clay_LayoutUnit right; Clay_LayoutUnit top; Clay_LayoutUnit bottom;
     };
-    uint16_t childGap;
+    Clay_LayoutUnit childGap;
     Clay_ChildAlignment childAlignment {
         .x = CLAY_ALIGN_X_LEFT (default) | CLAY_ALIGN_X_CENTER | CLAY_ALIGN_X_RIGHT;
         .y = CLAY_ALIGN_Y_TOP (default) | CLAY_ALIGN_Y_CENTER | CLAY_ALIGN_Y_BOTTOM | CLAY_ALIGN_Y_BASELINE;
@@ -1348,8 +1348,8 @@ Clay_LayoutConfig {
     Clay_LayoutWrapMode wrapMode {
         CLAY_WRAP_NO_WRAP (default) | CLAY_WRAP_WRAP;
     };
-    uint16_t rowGap;
-    uint16_t columnGap;
+    Clay_LayoutUnit rowGap;
+    Clay_LayoutUnit columnGap;
     Clay_Sizing sizing { // Recommended to use the provided macros here - see #sizing for more in depth explanation
         .width = CLAY_SIZING_FIT(float min, float max) (default) | CLAY_SIZING_GROW(float min, float max) | CLAY_SIZING_FIXED(float width) | CLAY_SIZING_PERCENT(float percent)
         .height = CLAY_SIZING_FIT(float min, float max) (default) | CLAY_SIZING_GROW(float min, float max) | CLAY_SIZING_FIXED(float height) | CLAY_SIZING_PERCENT(float percent)
@@ -1371,7 +1371,7 @@ _Did you know that "left to right" and "top to bottom" both have 13 letters?_
 
 ---
 
-**`.padding`** - `Clay_Padding`
+**`.padding`** - `Clay_Padding` (`Clay_LayoutUnit` values)
 
 `CLAY(CLAY_ID("Element"), { .layout = { .padding = { .left = 16, .right = 16, .top = 8, .bottom = 8 } } })`
 
@@ -1381,7 +1381,7 @@ Controls white-space "padding" around the **outside** of child elements.
 
 ---
 
-**`.childGap`** - `uint16_t`
+**`.childGap`** - `Clay_LayoutUnit`
 
 `CLAY(CLAY_ID("Element"), { .layout = { .childGap = 16 } })`
 
@@ -1423,7 +1423,7 @@ children remain on their own line and are not shrunk by wrapping.
 
 ---
 
-**`.rowGap` and `.columnGap`** - `uint16_t`
+**`.rowGap` and `.columnGap`** - `Clay_LayoutUnit`
 
 `rowGap` controls vertical space between wrapped rows and `columnGap` controls
 horizontal space between wrapped columns. They also provide the main-axis gap

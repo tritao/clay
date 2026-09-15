@@ -228,6 +228,10 @@ typedef struct Clay_Dimensions {
     float width, height;
 } Clay_Dimensions;
 
+// Logical layout units retain fractional values for DPI scaling, animation,
+// and responsive interpolation.
+typedef float Clay_LayoutUnit;
+
 typedef struct Clay_Vector2 {
     float x, y;
 } Clay_Vector2;
@@ -381,13 +385,13 @@ typedef struct Clay_Sizing {
     Clay_SizingAxis height;  // Controls the height sizing of the element, along the y axis.
 } Clay_Sizing;
 
-// Controls "padding" in pixels, which is a gap between the bounding box of this element and where its children
+// Controls logical "padding", which is a gap between the bounding box of this element and where its children
 // will be placed.
 typedef struct Clay_Padding {
-    uint16_t left;
-    uint16_t right;
-    uint16_t top;
-    uint16_t bottom;
+    Clay_LayoutUnit left;
+    Clay_LayoutUnit right;
+    Clay_LayoutUnit top;
+    Clay_LayoutUnit bottom;
 } Clay_Padding;
 
 CLAY__WRAPPER_STRUCT(Clay_Padding);
@@ -396,14 +400,14 @@ CLAY__WRAPPER_STRUCT(Clay_Padding);
 // of any child elements.
 typedef struct Clay_LayoutConfig {
     Clay_Sizing sizing; // Controls the sizing of this element inside it's parent container, including FIT, GROW, PERCENT and FIXED sizing.
-    Clay_Padding padding; // Controls "padding" in pixels, which is a gap between the bounding box of this element and where its children will be placed.
-    uint16_t childGap; // Controls the gap in pixels between child elements along the layout axis (horizontal gap for LEFT_TO_RIGHT, vertical gap for TOP_TO_BOTTOM).
+    Clay_Padding padding; // Controls logical padding, which is a gap between the bounding box of this element and where its children will be placed.
+    Clay_LayoutUnit childGap; // Legacy shorthand gap along the layout axis.
     Clay_ChildAlignment childAlignment; // Controls how child elements are aligned on the cross axis.
     Clay_ChildDistribution childDistribution; // Controls how free space is distributed along the layout axis.
     Clay_LayoutDirection layoutDirection; // Controls the direction in which child elements will be automatically laid out.
     Clay_LayoutWrapMode wrapMode; // Controls whether children flow onto additional rows or columns.
-    uint16_t rowGap; // Controls the vertical gap between wrapped rows.
-    uint16_t columnGap; // Controls the horizontal gap between wrapped columns.
+    Clay_LayoutUnit rowGap; // Controls the vertical gap between wrapped rows.
+    Clay_LayoutUnit columnGap; // Controls the horizontal gap between wrapped columns.
     Clay_AlignSelf alignSelf; // Optional cross-axis alignment override when this element is a child.
 } Clay_LayoutConfig;
 
