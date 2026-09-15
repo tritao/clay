@@ -1432,6 +1432,15 @@ zero, the older `childGap` value is used as a shorthand for both axes.
 
 ---
 
+**`.alignSelf`** - `Clay_AlignSelf`
+
+Overrides the parent cross-axis alignment for this child. The default
+`CLAY_ALIGN_SELF_INHERIT` uses the parent's `childAlignment`; the other values
+select start, end, center, or baseline alignment. Baseline applies to children
+of left-to-right parents.
+
+---
+
 **`.childDistribution`** - `Clay_ChildDistribution`
 
 Controls how free space is distributed along the layout direction. `CLAY_DISTRIBUTE_START` places children at the start, `CLAY_DISTRIBUTE_CENTER` centers them as a group, and `CLAY_DISTRIBUTE_END` places them at the end. `CLAY_DISTRIBUTE_SPACE_BETWEEN`, `CLAY_DISTRIBUTE_SPACE_AROUND`, and `CLAY_DISTRIBUTE_SPACE_EVENLY` add free-space gaps between and around children. The configured main-axis gap remains in addition to any distributed free space. With wrapping enabled, distribution is calculated independently for each line.

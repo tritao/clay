@@ -319,6 +319,18 @@ typedef struct Clay_ChildAlignment {
     Clay_LayoutAlignmentY y; // Controls cross-axis alignment for left-to-right layouts.
 } Clay_ChildAlignment;
 
+// Controls whether a child uses its parent's cross-axis alignment or overrides
+// it for this element. The value is interpreted against the parent's layout
+// direction; BASELINE applies to left-to-right parents.
+typedef CLAY_PACKED_ENUM {
+    // (default) Uses the parent's Clay_ChildAlignment value.
+    CLAY_ALIGN_SELF_INHERIT,
+    CLAY_ALIGN_SELF_START,
+    CLAY_ALIGN_SELF_END,
+    CLAY_ALIGN_SELF_CENTER,
+    CLAY_ALIGN_SELF_BASELINE,
+} Clay_AlignSelf;
+
 // Controls how free space is distributed along the parent's layout axis.
 typedef CLAY_PACKED_ENUM {
     // Places the first child at the start of the layout axis.
@@ -392,6 +404,7 @@ typedef struct Clay_LayoutConfig {
     Clay_LayoutWrapMode wrapMode; // Controls whether children flow onto additional rows or columns.
     uint16_t rowGap; // Controls the vertical gap between wrapped rows.
     uint16_t columnGap; // Controls the horizontal gap between wrapped columns.
+    Clay_AlignSelf alignSelf; // Optional cross-axis alignment override when this element is a child.
 } Clay_LayoutConfig;
 
 CLAY__WRAPPER_STRUCT(Clay_LayoutConfig);
@@ -2820,6 +2833,43 @@ void Clay__ApplyMeasureElement(Clay_LayoutElement *element, Clay_LayoutElement *
     }
 }
 
+Clay_AlignSelf Clay__GetAlignSelf(Clay_LayoutElement *element) {
+    return element->isTextElement ? CLAY_ALIGN_SELF_INHERIT : element->config.layout.alignSelf;
+}
+
+Clay_LayoutAlignmentX Clay__GetChildAlignmentX(Clay_LayoutElement *parent,
+                                               Clay_LayoutElement *child) {
+    switch (Clay__GetAlignSelf(child)) {
+        case CLAY_ALIGN_SELF_START:
+            return CLAY_ALIGN_X_LEFT;
+        case CLAY_ALIGN_SELF_END:
+            return CLAY_ALIGN_X_RIGHT;
+        case CLAY_ALIGN_SELF_CENTER:
+            return CLAY_ALIGN_X_CENTER;
+        case CLAY_ALIGN_SELF_BASELINE:
+        case CLAY_ALIGN_SELF_INHERIT:
+        default:
+            return parent->config.layout.childAlignment.x;
+    }
+}
+
+Clay_LayoutAlignmentY Clay__GetChildAlignmentY(Clay_LayoutElement *parent,
+                                               Clay_LayoutElement *child) {
+    switch (Clay__GetAlignSelf(child)) {
+        case CLAY_ALIGN_SELF_START:
+            return CLAY_ALIGN_Y_TOP;
+        case CLAY_ALIGN_SELF_END:
+            return CLAY_ALIGN_Y_BOTTOM;
+        case CLAY_ALIGN_SELF_CENTER:
+            return CLAY_ALIGN_Y_CENTER;
+        case CLAY_ALIGN_SELF_BASELINE:
+            return CLAY_ALIGN_Y_BASELINE;
+        case CLAY_ALIGN_SELF_INHERIT:
+        default:
+            return parent->config.layout.childAlignment.y;
+    }
+}
+
 // Writes out the location of text elements to layout elements buffer 1
 void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArray* textElementsOut, Clay__int32_tArray* aspectRatioElementsOut) {
     Clay_Context* context = Clay_GetCurrentContext();
@@ -3864,11 +3914,12 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             // Add children to the DFS buffer
             const float childGap = Clay__MainAxisGap(layoutConfig) + distributionGap;
             float baseline = 0.0f;
-            if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT &&
-                layoutConfig->childAlignment.y == CLAY_ALIGN_Y_BASELINE) {
+            if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
                 for (int32_t i = 0; i < currentElement->children.length; ++i) {
                     Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[i]);
-                    if (childElement->exiting)
+                    if (childElement->exiting ||
+                        Clay__GetChildAlignmentY(currentElement, childElement) !=
+                            CLAY_ALIGN_Y_BASELINE)
                         continue;
                     const float childBaseline = childElement->hasBaseline
                                                     ? childElement->baseline
@@ -3882,6 +3933,10 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
             for (int32_t i = 0; i < currentElement->children.length; ++i) {
                 Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, currentElement->children.elements[i]);
                 Clay_LayoutElementHashMapItem* childMapItem = Clay__GetHashMapItem(childElement->id);
+                const Clay_LayoutAlignmentX childAlignmentX =
+                    Clay__GetChildAlignmentX(currentElement, childElement);
+                const Clay_LayoutAlignmentY childAlignmentY =
+                    Clay__GetChildAlignmentY(currentElement, childElement);
                 // Alignment along non layout axis
                 if (wrapped && !childElement->exiting) {
                     const bool xAxis = layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT;
@@ -3899,7 +3954,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                             (float)layoutConfig->padding.top + line->crossOffset;
                         const float whiteSpaceAroundChild =
                             line->crossSize - childElement->dimensions.height;
-                        switch (layoutConfig->childAlignment.y) {
+                        switch (childAlignmentY) {
                             case CLAY_ALIGN_Y_TOP:
                                 break;
                             case CLAY_ALIGN_Y_CENTER:
@@ -3922,7 +3977,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                         currentElementTreeNode->nextChildOffset.y = wrapMainOffset;
                         const float whiteSpaceAroundChild =
                             line->crossSize - childElement->dimensions.width;
-                        switch (layoutConfig->childAlignment.x) {
+                        switch (childAlignmentX) {
                             case CLAY_ALIGN_X_LEFT:
                                 break;
                             case CLAY_ALIGN_X_CENTER:
@@ -3937,7 +3992,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 } else if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
                     currentElementTreeNode->nextChildOffset.y = currentElement->config.layout.padding.top;
                     float whiteSpaceAroundChild = currentElement->dimensions.height - (float)(layoutConfig->padding.top + layoutConfig->padding.bottom) - childElement->dimensions.height;
-                    switch (layoutConfig->childAlignment.y) {
+                    switch (childAlignmentY) {
                         case CLAY_ALIGN_Y_TOP: break;
                         case CLAY_ALIGN_Y_CENTER: currentElementTreeNode->nextChildOffset.y += whiteSpaceAroundChild / 2; break;
                         case CLAY_ALIGN_Y_BOTTOM: currentElementTreeNode->nextChildOffset.y += whiteSpaceAroundChild; break;
@@ -3949,7 +4004,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                 } else {
                     currentElementTreeNode->nextChildOffset.x = currentElement->config.layout.padding.left;
                     float whiteSpaceAroundChild = currentElement->dimensions.width - (float)(layoutConfig->padding.left + layoutConfig->padding.right) - childElement->dimensions.width;
-                    switch (layoutConfig->childAlignment.x) {
+                    switch (childAlignmentX) {
                         case CLAY_ALIGN_X_LEFT: break;
                         case CLAY_ALIGN_X_CENTER: currentElementTreeNode->nextChildOffset.x += whiteSpaceAroundChild / 2; break;
                         case CLAY_ALIGN_X_RIGHT: currentElementTreeNode->nextChildOffset.x += whiteSpaceAroundChild; break;
