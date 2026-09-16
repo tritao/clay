@@ -3190,11 +3190,14 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                     if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical))) {
                         maxSize = CLAY__MAX(maxSize, innerContentSize);
                     }
-                    if (childSizing.type == CLAY__SIZING_TYPE_GROW)
+                    if (maxSize <= 0.0f)
+                        *childSize = 0.0f;
+                    else if (childSizing.type == CLAY__SIZING_TYPE_GROW)
                         *childSize = CLAY__MIN(maxSize, childSizing.size.minMax.max);
                     else if (externalTextCrossAxis)
                         *childSize = maxSize;
-                    *childSize = CLAY__MAX(minSize, CLAY__MIN(*childSize, maxSize));
+                    if (maxSize > 0.0f)
+                        *childSize = CLAY__MAX(minSize, CLAY__MIN(*childSize, maxSize));
                 }
             }
         }
