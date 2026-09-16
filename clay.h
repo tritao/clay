@@ -2439,6 +2439,11 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                 Clay_LayoutElement *childElement = Clay_LayoutElementArray_Get(&context->layoutElements, childElementIndex);
                 Clay_SizingAxis childSizing = Clay__GetElementSizing(childElement, xAxis);
                 float childSize = xAxis ? childElement->dimensions.width : childElement->dimensions.height;
+                // External paragraph engines need the containing block width
+                // on the cross axis, even when the unwrapped text is narrower
+                // than that block (for example, an RTL paragraph).
+                const bool externalTextCrossAxis =
+                    xAxis && !sizingAlongAxis && Clay__LayoutText && childElement->isTextElement;
 
                 if (textElementsOut && childElement->isTextElement) {
                     Clay__int32_tArray_Add(textElementsOut, childElementIndex);
@@ -2457,7 +2462,9 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
 
                 if (childSizing.type != CLAY__SIZING_TYPE_PERCENT
                     && childSizing.type != CLAY__SIZING_TYPE_FIXED
-                    && (!childElement->isTextElement || childElement->textConfig.wrapMode == CLAY_TEXT_WRAP_WORDS)
+                    && (!childElement->isTextElement ||
+                        childElement->textConfig.wrapMode == CLAY_TEXT_WRAP_WORDS ||
+                        externalTextCrossAxis)
 //                    && (xAxis || !Clay__ElementHasConfig(childElement, CLAY__ELEMENT_CONFIG_TYPE_ASPECT))
                 ) {
                     Clay__int32_tArray_Add(&resizableContainerBuffer, childElementIndex);
@@ -2590,15 +2597,18 @@ void Clay__SizeContainersAlongAxis(bool xAxis, float deltaTime, Clay__int32_tArr
                     Clay_SizingAxis childSizing = Clay__GetElementSizing(childElement, xAxis);
                     float minSize = xAxis ? childElement->minDimensions.width : childElement->minDimensions.height;
                     float *childSize = xAxis ? &childElement->dimensions.width : &childElement->dimensions.height;
+                    const bool externalTextCrossAxis =
+                        xAxis && Clay__LayoutText && childElement->isTextElement;
 
                     float maxSize = parentSize - parentPadding;
                     // If we're laying out the children of a scroll panel, grow containers expand to the size of the inner content, not the outer container
                     if (((xAxis && parent->config.clip.horizontal) || (!xAxis && parent->config.clip.vertical))) {
                         maxSize = CLAY__MAX(maxSize, innerContentSize);
                     }
-                    if (childSizing.type == CLAY__SIZING_TYPE_GROW) {
+                    if (childSizing.type == CLAY__SIZING_TYPE_GROW)
                         *childSize = CLAY__MIN(maxSize, childSizing.size.minMax.max);
-                    }
+                    else if (externalTextCrossAxis)
+                        *childSize = maxSize;
                     *childSize = CLAY__MAX(minSize, CLAY__MIN(*childSize, maxSize));
                 }
             }
