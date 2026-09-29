@@ -2079,6 +2079,9 @@ void Clay__CloseElement(void) {
 
     // Attach children to the current open element
     openLayoutElement->children.elements = &context->layoutElementChildren.internalArray[context->layoutElementChildren.length];
+    // A wrapping container can break onto new lines, so along its main axis it only needs room for its
+    // widest child, not for all children side by side.
+    const bool wrapsChildren = layoutConfig->wrapMode == CLAY_WRAP_WRAP;
     if (layoutConfig->layoutDirection == CLAY_LEFT_TO_RIGHT) {
         openLayoutElement->dimensions.width = leftRightPadding;
         openLayoutElement->minDimensions.width = leftRightPadding;
@@ -2089,7 +2092,11 @@ void Clay__CloseElement(void) {
             openLayoutElement->dimensions.height = CLAY__MAX(openLayoutElement->dimensions.height, child->dimensions.height + topBottomPadding);
             // Minimum size of child elements doesn't matter to clip containers as they can shrink and hide their contents
             if (!elementHasClipHorizontal) {
-                openLayoutElement->minDimensions.width += child->minDimensions.width;
+                if (wrapsChildren) {
+                    openLayoutElement->minDimensions.width = CLAY__MAX(openLayoutElement->minDimensions.width, child->minDimensions.width + leftRightPadding);
+                } else {
+                    openLayoutElement->minDimensions.width += child->minDimensions.width;
+                }
             }
             if (!elementHasClipVertical) {
                 openLayoutElement->minDimensions.height = CLAY__MAX(openLayoutElement->minDimensions.height, child->minDimensions.height + topBottomPadding);
@@ -2099,7 +2106,7 @@ void Clay__CloseElement(void) {
         float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) *
                                  Clay__MainAxisGap(layoutConfig));
         openLayoutElement->dimensions.width += childGap;
-        if (!elementHasClipHorizontal) {
+        if (!elementHasClipHorizontal && !wrapsChildren) {
             openLayoutElement->minDimensions.width += childGap;
         }
     }
@@ -2113,7 +2120,11 @@ void Clay__CloseElement(void) {
             openLayoutElement->dimensions.width = CLAY__MAX(openLayoutElement->dimensions.width, child->dimensions.width + leftRightPadding);
             // Minimum size of child elements doesn't matter to clip containers as they can shrink and hide their contents
             if (!elementHasClipVertical) {
-                openLayoutElement->minDimensions.height += child->minDimensions.height;
+                if (wrapsChildren) {
+                    openLayoutElement->minDimensions.height = CLAY__MAX(openLayoutElement->minDimensions.height, child->minDimensions.height + topBottomPadding);
+                } else {
+                    openLayoutElement->minDimensions.height += child->minDimensions.height;
+                }
             }
             if (!elementHasClipHorizontal) {
                 openLayoutElement->minDimensions.width = CLAY__MAX(openLayoutElement->minDimensions.width, child->minDimensions.width + leftRightPadding);
@@ -2123,7 +2134,7 @@ void Clay__CloseElement(void) {
         float childGap = (float)(CLAY__MAX(openLayoutElement->children.length - 1, 0) *
                                  Clay__MainAxisGap(layoutConfig));
         openLayoutElement->dimensions.height += childGap;
-        if (!elementHasClipVertical) {
+        if (!elementHasClipVertical && !wrapsChildren) {
             openLayoutElement->minDimensions.height += childGap;
         }
     }
@@ -2499,16 +2510,14 @@ float Clay__GrowWeight(Clay_SizingAxis sizing) {
     return sizing.growWeight;
 }
 
+// Each axis falls back to childGap on its own, so setting only rowGap (or only columnGap) does not
+// silently zero the other axis' spacing.
 float Clay__RowGap(const Clay_LayoutConfig *layoutConfig) {
-    if (layoutConfig->rowGap == 0 && layoutConfig->columnGap == 0)
-        return (float)layoutConfig->childGap;
-    return (float)layoutConfig->rowGap;
+    return layoutConfig->rowGap != 0 ? (float)layoutConfig->rowGap : (float)layoutConfig->childGap;
 }
 
 float Clay__ColumnGap(const Clay_LayoutConfig *layoutConfig) {
-    if (layoutConfig->rowGap == 0 && layoutConfig->columnGap == 0)
-        return (float)layoutConfig->childGap;
-    return (float)layoutConfig->columnGap;
+    return layoutConfig->columnGap != 0 ? (float)layoutConfig->columnGap : (float)layoutConfig->childGap;
 }
 
 float Clay__MainAxisGap(const Clay_LayoutConfig *layoutConfig) {
