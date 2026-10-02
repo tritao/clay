@@ -3268,6 +3268,8 @@ bool Clay__ElementIsOffscreen(Clay_BoundingBox *boundingBox) {
            (boundingBox->y + boundingBox->height < 0);
 }
 
+void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool useStoredBoundingBoxes, bool generateRenderCommands);
+
 void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bool generateRenderCommands) {
     Clay_Context* context = Clay_GetCurrentContext();
 
@@ -3524,6 +3526,24 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
         element->hasBaseline = true;
     }
 
+    // Z order decides paint order, but positioning must be parent-first:
+    // a floating root reads its parent's bounding box from the hash map, and
+    // a root sorted ahead of the root that lays out its parent (for example a
+    // negative z-index child) would read the previous layout's box. Roots are
+    // declared parent-first, so when z order would reorder them, position
+    // every root in declaration order first without emitting commands.
+    bool rootsNeedReordering = false;
+    for (int32_t i = 0; i + 1 < context->layoutElementTreeRoots.length; ++i) {
+        if (Clay__LayoutElementTreeRootArray_Get(&context->layoutElementTreeRoots, i + 1)->zIndex <
+            Clay__LayoutElementTreeRootArray_Get(&context->layoutElementTreeRoots, i)->zIndex) {
+            rootsNeedReordering = true;
+            break;
+        }
+    }
+    if (rootsNeedReordering) {
+        Clay__PositionTreeRoots(dfsBuffer, false, false);
+    }
+
     // Sort tree roots by z-index
     int32_t sortMax = context->layoutElementTreeRoots.length - 1;
     while (sortMax > 0) { // todo dumb bubble sort
@@ -3540,6 +3560,14 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
 
     // Calculate final positions and generate render commands
     context->renderCommands.length = 0;
+    Clay__PositionTreeRoots(dfsBuffer, useStoredBoundingBoxes, generateRenderCommands);
+}
+
+// Positions every tree root in the current root order and, when requested,
+// emits render commands. Floating roots read their parent's bounding box from
+// the hash map, so that box must already be current for this layout.
+void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool useStoredBoundingBoxes, bool generateRenderCommands) {
+    Clay_Context* context = Clay_GetCurrentContext();
     dfsBuffer.length = 0;
 
     for (int32_t rootIndex = 0; rootIndex < context->layoutElementTreeRoots.length; ++rootIndex) {
@@ -4130,7 +4158,7 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
 
         if (root->clipElementId) {
             Clay_LayoutElementHashMapItem *clipHashMapItem = Clay__GetHashMapItem(root->clipElementId);
-            if (clipHashMapItem && !Clay__ElementIsOffscreen(&clipHashMapItem->boundingBox)) {
+            if (generateRenderCommands && clipHashMapItem && !Clay__ElementIsOffscreen(&clipHashMapItem->boundingBox)) {
                 Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) { .id = Clay__HashNumber(rootElement->id, rootElement->children.length + 11).id, .commandType = CLAY_RENDER_COMMAND_TYPE_SCISSOR_END });
             }
         }
