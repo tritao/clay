@@ -1019,7 +1019,9 @@ typedef CLAY_PACKED_ENUM {
     CLAY_ERROR_TYPE_INTERNAL_ERROR,
     // Clay__OpenElement was called more times than Clay__CloseElement, so there were still remaining open elements when the layout ended.
     CLAY_ERROR_TYPE_UNBALANCED_OPEN_CLOSE,
-    CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED
+    CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED,
+    // Persistent scroll or transition state exhausted its declared capacity.
+    CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED
 } Clay_ErrorType;
 
 // Data to identify the error that clay has encountered.
@@ -1041,6 +1043,10 @@ typedef struct Clay_ErrorData {
     Clay_String errorText;
     // A transparent pointer passed through from when the error handler was first provided.
     void *userData;
+    // Populated for CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED.
+    Clay_String arrayName;
+    int32_t capacity;
+    uint32_t elementId;
 } Clay_ErrorData;
 
 // A wrapper struct around Clay's error handler function.
@@ -1145,6 +1151,10 @@ CLAY_DLL_EXPORT void Clay_SetLayoutTextFunction(Clay_LayoutTextFunction layoutTe
 // Experimental - Used in cases where Clay needs to integrate with a system that manages its own scrolling containers externally.
 // Please reach out if you plan to use this function, as it may be subject to change.
 CLAY_DLL_EXPORT void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrollOffsetFunction)(uint32_t elementId, void *userData), void *userData);
+// Disable persistent native scrolling when the host owns scroll state. Clipping
+// and clip.childOffset remain active. Call between layouts; disabling retires
+// cached scroll records. Enabled by default, independently for each context.
+CLAY_DLL_EXPORT void Clay_SetScrollTrackingEnabled(bool enabled);
 // A bounds-checked "get" function for the Clay_RenderCommandArray returned from Clay_EndLayout().
 CLAY_DLL_EXPORT Clay_RenderCommand * Clay_RenderCommandArray_Get(Clay_RenderCommandArray* array, int32_t index);
 // Enables and disables Clay's internal debug tools.
@@ -1520,6 +1530,8 @@ struct Clay_Context {
 #endif
     bool disableCulling;
     bool externalScrollHandlingEnabled;
+    bool scrollTrackingDisabled;
+    bool stateCapacityExceeded;
 #ifndef CLAY_DISABLE_DEBUG
     uint32_t debugSelectedElementId;
 #endif
@@ -2339,6 +2351,20 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
     parentElement->children.length++;
 }
 
+// Never return a mutable default record when persistent state is exhausted.
+static void Clay__ReportStateCapacity(Clay_String arrayName, int32_t capacity, uint32_t elementId) {
+    Clay_Context *context = Clay_GetCurrentContext();
+    context->stateCapacityExceeded = true;
+    context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
+        .errorType = CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED,
+        .errorText = CLAY_STRING("Clay persistent state capacity exceeded."),
+        .userData = context->errorHandler.userData,
+        .arrayName = arrayName,
+        .capacity = capacity,
+        .elementId = elementId,
+    });
+}
+
 void Clay__ConfigureOpenElementPtr(const Clay_ElementDeclaration *declaration) {
     Clay_Context* context = Clay_GetCurrentContext();
     Clay_LayoutElement *openLayoutElement = Clay__GetOpenLayoutElement();
@@ -2392,21 +2418,28 @@ void Clay__ConfigureOpenElementPtr(const Clay_ElementDeclaration *declaration) {
 
     if (declaration->clip.horizontal || declaration->clip.vertical) {
         Clay__int32_tArray_Add(&context->openClipElementStack, (int)openLayoutElement->id);
-        // Retrieve or create cached data to track scroll position across frames
-        Clay__ScrollContainerDataInternal *scrollOffset = CLAY__NULL;
-        for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
-            Clay__ScrollContainerDataInternal *mapping = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
-            if (openLayoutElement->id == mapping->elementId) {
-                scrollOffset = mapping;
-                scrollOffset->layoutElement = openLayoutElement;
-                scrollOffset->openThisFrame = true;
+        if (!context->scrollTrackingDisabled) {
+            // Retrieve or create cached data to track scroll position across frames
+            Clay__ScrollContainerDataInternal *scrollOffset = CLAY__NULL;
+            for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
+                Clay__ScrollContainerDataInternal *mapping = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
+                if (openLayoutElement->id == mapping->elementId) {
+                    scrollOffset = mapping;
+                    scrollOffset->layoutElement = openLayoutElement;
+                    scrollOffset->openThisFrame = true;
+                }
             }
-        }
-        if (!scrollOffset) {
-            scrollOffset = Clay__ScrollContainerDataInternalArray_Add(&context->scrollContainerDatas, CLAY__INIT(Clay__ScrollContainerDataInternal){.layoutElement = openLayoutElement, .scrollOrigin = {-1,-1}, .elementId = openLayoutElement->id, .openThisFrame = true});
-        }
-        if (context->externalScrollHandlingEnabled) {
-            scrollOffset->scrollPosition = Clay__QueryScrollOffset(scrollOffset->elementId, context->queryScrollOffsetUserData);
+            if (!scrollOffset) {
+                if (context->scrollContainerDatas.length >= context->scrollContainerDatas.capacity) {
+                    Clay__ReportStateCapacity(CLAY_STRING("scrollContainerDatas"),
+                        context->scrollContainerDatas.capacity, openLayoutElement->id);
+                    return;
+                }
+                scrollOffset = Clay__ScrollContainerDataInternalArray_Add(&context->scrollContainerDatas, CLAY__INIT(Clay__ScrollContainerDataInternal){.layoutElement = openLayoutElement, .scrollOrigin = {-1,-1}, .elementId = openLayoutElement->id, .openThisFrame = true});
+            }
+            if (context->externalScrollHandlingEnabled) {
+                scrollOffset->scrollPosition = Clay__QueryScrollOffset(scrollOffset->elementId, context->queryScrollOffsetUserData);
+            }
         }
     }
     // Setup data to track transitions across frames
@@ -2432,6 +2465,11 @@ void Clay__ConfigureOpenElementPtr(const Clay_ElementDeclaration *declaration) {
             }
         }
         if (!transitionData) {
+            if (context->transitionDatas.length >= context->transitionDatas.capacity) {
+                Clay__ReportStateCapacity(CLAY_STRING("transitionDatas"),
+                    context->transitionDatas.capacity, openLayoutElement->id);
+                return;
+            }
             transitionData = Clay__TransitionDataInternalArray_Add(&context->transitionDatas, CLAY__INIT(Clay__TransitionDataInternal){
                 .elementThisFrame = openLayoutElement,
                 .elementId = openLayoutElement->id,
@@ -2479,8 +2517,11 @@ void Clay__InitializePersistentMemory(Clay_Context* context) {
     int32_t maxMeasureTextCacheWordCount = context->maxMeasureTextCacheWordCount;
     Clay_Arena *arena = &context->internalArena;
 
-    context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(100, arena);
-    context->transitionDatas = Clay__TransitionDataInternalArray_Allocate_Arena(200, arena);
+    // Records from the previous and current layouts can coexist while building
+    // a replacement tree. Reserve both generations without overflowing int32.
+    int32_t stateCapacity = maxElementCount <= INT32_MAX / 2 ? maxElementCount * 2 : INT32_MAX;
+    context->scrollContainerDatas = Clay__ScrollContainerDataInternalArray_Allocate_Arena(stateCapacity, arena);
+    context->transitionDatas = Clay__TransitionDataInternalArray_Allocate_Arena(stateCapacity, arena);
     context->layoutElementsHashMapInternal = Clay__LayoutElementHashMapItemArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMap = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);
     context->layoutElementsHashMapFreeList = Clay__int32_tArray_Allocate_Arena(maxElementCount, arena);
@@ -3319,8 +3360,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                                             externalLayout.baseline < CLAY__MAXFLOAT;
             containerElement->baseline = containerElement->hasBaseline ? externalLayout.baseline : 0.0f;
             for (int32_t lineIndex = 0; lineIndex < externalLayout.lineCount; ++lineIndex) {
-                const Clay_TextLayoutLine &line = externalLayout.lines[lineIndex];
-                if (line.line.length < 0 || (line.line.length > 0 && line.line.chars == CLAY__NULL)) {
+                const Clay_TextLayoutLine *line = &externalLayout.lines[lineIndex];
+                if (line->line.length < 0 || (line->line.length > 0 && line->line.chars == CLAY__NULL)) {
                     context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
                         .errorType = CLAY_ERROR_TYPE_TEXT_LAYOUT_FUNCTION_FAILED,
                         .errorText = CLAY_STRING("The external paragraph-layout function returned an invalid line."),
@@ -3330,13 +3371,13 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     break;
                 }
                 Clay__WrappedTextLineArray_Add(&context->wrappedTextLines, CLAY__INIT(Clay__WrappedTextLine) {
-                    .dimensions = line.dimensions,
+                    .dimensions = line->dimensions,
                     .line = CLAY__INIT(Clay_String) {
                         .isStaticallyAllocated = false,
-                        .length = line.line.length,
-                        .chars = line.line.chars
+                        .length = line->line.length,
+                        .chars = line->line.chars
                     },
-                    .offset = line.offset,
+                    .offset = line->offset,
                     .textLayoutId = externalLayout.layoutId,
                     .textLineIndex = (uint32_t)lineIndex
                 });
@@ -3675,16 +3716,9 @@ void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool us
                     bool closeClipElement = false;
                     if (currentElement->config.clip.horizontal || currentElement->config.clip.vertical) {
                         closeClipElement = true;
-                        for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
-                            Clay__ScrollContainerDataInternal *mapping = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
-                            if (mapping->layoutElement == currentElement) {
-                                scrollOffset = currentElement->config.clip.childOffset;
-                                if (context->externalScrollHandlingEnabled) {
-                                    scrollOffset = CLAY__INIT(Clay_Vector2) CLAY__DEFAULT_STRUCT;
-                                }
-                                break;
-                            }
-                        }
+                        scrollOffset = context->externalScrollHandlingEnabled
+                            ? CLAY__INIT(Clay_Vector2) CLAY__DEFAULT_STRUCT
+                            : currentElement->config.clip.childOffset;
                     }
 
                     if (Clay__BorderHasAnyWidth(&currentElement->config.border)) {
@@ -3800,16 +3834,15 @@ void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool us
 
                 // Apply scroll offsets to container
                 if (currentElement->config.clip.horizontal || currentElement->config.clip.vertical) {
-                    // This linear scan could theoretically be slow under very strange conditions, but I can't imagine a real UI with more than a few 10's of scroll containers
+                    // Offsets and clipping do not depend on persistent scroll records.
+                    scrollOffset = context->externalScrollHandlingEnabled
+                        ? CLAY__INIT(Clay_Vector2) CLAY__DEFAULT_STRUCT
+                        : currentElement->config.clip.childOffset;
                     for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
                         Clay__ScrollContainerDataInternal *mapping = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
                         if (mapping->layoutElement == currentElement) {
                             scrollContainerData = mapping;
                             mapping->boundingBox = currentElementBoundingBox;
-                            scrollOffset = currentElement->config.clip.childOffset;
-                            if (context->externalScrollHandlingEnabled) {
-                                scrollOffset = CLAY__INIT(Clay_Vector2) CLAY__DEFAULT_STRUCT;
-                            }
                             break;
                         }
                     }
@@ -5233,26 +5266,35 @@ Clay_Vector2 Clay_GetScrollOffset(void) {
     return CLAY__INIT(Clay_Vector2) CLAY__DEFAULT_STRUCT;
 }
 
+CLAY_WASM_EXPORT("Clay_SetScrollTrackingEnabled")
+void Clay_SetScrollTrackingEnabled(bool enabled) {
+    Clay_Context *context = Clay_GetCurrentContext();
+    context->scrollTrackingDisabled = !enabled;
+    if (!enabled) context->scrollContainerDatas.length = 0;
+}
+
 CLAY_WASM_EXPORT("Clay_UpdateScrollContainers")
 void Clay_UpdateScrollContainers(bool enableDragScrolling, Clay_Vector2 scrollDelta, float deltaTime) {
     Clay_Context* context = Clay_GetCurrentContext();
+    if (context->scrollTrackingDisabled) return;
+    // Retire before selecting a scroll target. Swapback removal must inspect the
+    // replacement slot, and cannot invalidate a target selected earlier.
+    for (int32_t i = 0; i < context->scrollContainerDatas.length;) {
+        Clay__ScrollContainerDataInternal *data = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
+        if (!data->openThisFrame || Clay__GetHashMapItem(data->elementId) == &Clay_LayoutElementHashMapItem_DEFAULT) {
+            Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
+        } else {
+            i++;
+        }
+    }
     bool isPointerActive = enableDragScrolling && (context->pointerInfo.state == CLAY_POINTER_DATA_PRESSED || context->pointerInfo.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME);
     // Don't apply scroll events to ancestors of the inner element
     int32_t highestPriorityElementIndex = -1;
     Clay__ScrollContainerDataInternal *highestPriorityScrollData = CLAY__NULL;
     for (int32_t i = 0; i < context->scrollContainerDatas.length; i++) {
         Clay__ScrollContainerDataInternal *scrollData = Clay__ScrollContainerDataInternalArray_Get(&context->scrollContainerDatas, i);
-        if (!scrollData->openThisFrame) {
-            Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
-            continue;
-        }
         scrollData->openThisFrame = false;
         Clay_LayoutElementHashMapItem *hashMapItem = Clay__GetHashMapItem(scrollData->elementId);
-        // Element isn't rendered this frame but scroll offset has been retained
-        if (!hashMapItem) {
-            Clay__ScrollContainerDataInternalArray_RemoveSwapback(&context->scrollContainerDatas, i);
-            continue;
-        }
 
         // Touch / click is released
         if (!isPointerActive && scrollData->pointerScrollActive) {
@@ -5353,6 +5395,7 @@ void Clay_BeginLayout(void) {
     Clay__InitializeEphemeralMemory(context);
     context->generation++;
     context->dynamicElementIndex = 0;
+    context->stateCapacityExceeded = false;
     // Set up the root container that covers the entire window
     Clay_Dimensions rootDimensions = {context->layoutDimensions.width, context->layoutDimensions.height};
 #ifndef CLAY_DISABLE_DEBUG
@@ -5446,6 +5489,7 @@ CLAY_WASM_EXPORT("Clay_EndLayout")
 Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
     Clay_Context* context = Clay_GetCurrentContext();
     Clay__CloseElement();
+    if (context->stateCapacityExceeded) return CLAY__INIT(Clay_RenderCommandArray) CLAY__DEFAULT_STRUCT;
 
     if (context->openLayoutElementStack.length > 1) {
         context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
@@ -5736,6 +5780,7 @@ Clay_RenderCommandArray Clay_EndLayout(float deltaTime) {
                                 transitionData->activeProperties = CLAY_TRANSITION_PROPERTY_NONE;
                             } else if (transitionData->state == CLAY_TRANSITION_STATE_EXITING) {
                                 Clay__TransitionDataInternalArray_RemoveSwapback(&context->transitionDatas, i);
+                                i--;
                             }
                         }
                     }

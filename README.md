@@ -1,6 +1,22 @@
 # Clay, A UI Layout Library
 **_Clay_** (short for **C Layout**) is a high performance 2D UI layout library.
 
+### Host-owned scrolling (fork extension)
+
+`Clay_SetScrollTrackingEnabled(false)` disables persistent native scroll records
+for the current context. Call it between layouts when the host owns scrolling.
+Clipping, clip child offsets and scissor commands remain active; native scroll
+queries return no record. Tracking is enabled by default and can be re-enabled.
+
+Scroll and transition tables reserve twice the declared element capacity for
+previous/current layout overlap. Long-lived exit transitions also consume this
+budget; applications must include retained elements in their capacity planning.
+`CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED` reports `arrayName`, `capacity` and
+`elementId`; the failing frame returns no commands and leaves default records
+untouched. Removing stale scroll records examines every swapback replacement
+before choosing a scroll target. The state-capacity regression covers clipping,
+native scrolling, ID churn, transition churn and controlled exhaustion.
+
 ### Major Features
 - Microsecond layout performance
 - Flex-box like layout model for complex, responsive layouts including text wrapping, scrolling containers and aspect ratio scaling
