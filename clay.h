@@ -1024,6 +1024,14 @@ typedef CLAY_PACKED_ENUM {
     CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED
 } Clay_ErrorType;
 
+// Supplemental diagnostics for CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED.
+// Kept separate so the existing error callback ABI remains unchanged.
+typedef struct {
+    Clay_String arrayName;
+    int32_t capacity;
+    uint32_t elementId;
+} Clay_StateCapacityError;
+
 // Data to identify the error that clay has encountered.
 typedef struct Clay_ErrorData {
     // Represents the type of error clay encountered while computing layout.
@@ -1043,10 +1051,6 @@ typedef struct Clay_ErrorData {
     Clay_String errorText;
     // A transparent pointer passed through from when the error handler was first provided.
     void *userData;
-    // Populated for CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED.
-    Clay_String arrayName;
-    int32_t capacity;
-    uint32_t elementId;
 } Clay_ErrorData;
 
 // A wrapper struct around Clay's error handler function.
@@ -1155,6 +1159,8 @@ CLAY_DLL_EXPORT void Clay_SetQueryScrollOffsetFunction(Clay_Vector2 (*queryScrol
 // and clip.childOffset remain active. Call between layouts; disabling retires
 // cached scroll records. Enabled by default, independently for each context.
 CLAY_DLL_EXPORT void Clay_SetScrollTrackingEnabled(bool enabled);
+// Valid until the next BeginLayout; read from the state-capacity error callback.
+CLAY_DLL_EXPORT Clay_StateCapacityError Clay_GetStateCapacityError(void);
 // A bounds-checked "get" function for the Clay_RenderCommandArray returned from Clay_EndLayout().
 CLAY_DLL_EXPORT Clay_RenderCommand * Clay_RenderCommandArray_Get(Clay_RenderCommandArray* array, int32_t index);
 // Enables and disables Clay's internal debug tools.
@@ -1532,6 +1538,7 @@ struct Clay_Context {
     bool externalScrollHandlingEnabled;
     bool scrollTrackingDisabled;
     bool stateCapacityExceeded;
+    Clay_StateCapacityError stateCapacityError;
 #ifndef CLAY_DISABLE_DEBUG
     uint32_t debugSelectedElementId;
 #endif
@@ -2355,13 +2362,11 @@ void Clay__OpenTextElement(Clay_String text, Clay_TextElementConfig textConfig) 
 static void Clay__ReportStateCapacity(Clay_String arrayName, int32_t capacity, uint32_t elementId) {
     Clay_Context *context = Clay_GetCurrentContext();
     context->stateCapacityExceeded = true;
+    context->stateCapacityError = CLAY__INIT(Clay_StateCapacityError) {arrayName, capacity, elementId};
     context->errorHandler.errorHandlerFunction(CLAY__INIT(Clay_ErrorData) {
         .errorType = CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED,
         .errorText = CLAY_STRING("Clay persistent state capacity exceeded."),
         .userData = context->errorHandler.userData,
-        .arrayName = arrayName,
-        .capacity = capacity,
-        .elementId = elementId,
     });
 }
 
@@ -5266,6 +5271,11 @@ Clay_Vector2 Clay_GetScrollOffset(void) {
     return CLAY__INIT(Clay_Vector2) CLAY__DEFAULT_STRUCT;
 }
 
+CLAY_WASM_EXPORT("Clay_GetStateCapacityError")
+Clay_StateCapacityError Clay_GetStateCapacityError(void) {
+    return Clay_GetCurrentContext()->stateCapacityError;
+}
+
 CLAY_WASM_EXPORT("Clay_SetScrollTrackingEnabled")
 void Clay_SetScrollTrackingEnabled(bool enabled) {
     Clay_Context *context = Clay_GetCurrentContext();
@@ -5396,6 +5406,7 @@ void Clay_BeginLayout(void) {
     context->generation++;
     context->dynamicElementIndex = 0;
     context->stateCapacityExceeded = false;
+    context->stateCapacityError = CLAY__INIT(Clay_StateCapacityError) CLAY__DEFAULT_STRUCT;
     // Set up the root container that covers the entire window
     Clay_Dimensions rootDimensions = {context->layoutDimensions.width, context->layoutDimensions.height};
 #ifndef CLAY_DISABLE_DEBUG

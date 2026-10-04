@@ -9,8 +9,12 @@
 #include <string_view>
 
 static Clay_ErrorData lastError{};
+static Clay_StateCapacityError details{};
 static int errors = 0;
-static void error(Clay_ErrorData data) { lastError = data; ++errors; }
+static void error(Clay_ErrorData data) {
+    lastError = data; ++errors;
+    if (data.errorType == CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED) details = Clay_GetStateCapacityError();
+}
 static bool complete(Clay_TransitionCallbackArguments) { return true; }
 static Clay_ElementId id(uint32_t index) { return Clay_GetElementIdWithIndex(CLAY_STRING("state-test"), index); }
 
@@ -43,8 +47,8 @@ static Clay_RenderCommandArray declare(int count, uint32_t base, bool transition
 
 static bool capacityError(const char *name, int capacity, uint32_t element) {
     return errors == 1 && lastError.errorType == CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED &&
-        lastError.capacity == capacity && lastError.elementId == element &&
-        std::string_view(lastError.arrayName.chars, lastError.arrayName.length) == name;
+        details.capacity == capacity && details.elementId == element &&
+        std::string_view(details.arrayName.chars, details.arrayName.length) == name;
 }
 
 int main() {

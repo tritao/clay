@@ -11,8 +11,9 @@ queries return no record. Tracking is enabled by default and can be re-enabled.
 Scroll and transition tables reserve twice the declared element capacity for
 previous/current layout overlap. Long-lived exit transitions also consume this
 budget; applications must include retained elements in their capacity planning.
-`CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED` reports `arrayName`, `capacity` and
-`elementId`; the failing frame returns no commands and leaves default records
+`CLAY_ERROR_TYPE_STATE_CAPACITY_EXCEEDED` exposes `arrayName`, `capacity` and
+`elementId` through `Clay_GetStateCapacityError()`, preserving the error callback
+ABI. The failing frame returns no commands and leaves default records
 untouched. Removing stale scroll records examines every swapback replacement
 before choosing a scroll target. The state-capacity regression covers clipping,
 native scrolling, ID churn, transition churn and controlled exhaustion.
