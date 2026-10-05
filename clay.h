@@ -473,6 +473,7 @@ CLAY__WRAPPER_STRUCT(Clay_TextElementConfig);
 typedef struct Clay_TextLayoutLine {
     Clay_Dimensions dimensions;
     Clay_StringSlice line;
+    // Position of this line relative to the returned paragraph box.
     Clay_Vector2 offset;
 } Clay_TextLayoutLine;
 
@@ -1357,6 +1358,7 @@ typedef struct {
     Clay_Vector2 offset;
     uint64_t textLayoutId;
     uint32_t textLineIndex;
+    bool externalPosition;
 } Clay__WrappedTextLine;
 
 CLAY__ARRAY_DEFINE(Clay__WrappedTextLine, Clay__WrappedTextLineArray)
@@ -3384,7 +3386,8 @@ void Clay__CalculateFinalLayout(float deltaTime, bool useStoredBoundingBoxes, bo
                     },
                     .offset = line->offset,
                     .textLayoutId = externalLayout.layoutId,
-                    .textLineIndex = (uint32_t)lineIndex
+                    .textLineIndex = (uint32_t)lineIndex,
+                    .externalPosition = true
                 });
                 textElementData->wrappedLines.length++;
             }
@@ -3867,11 +3870,11 @@ void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool us
                     for (int32_t lineIndex = 0; lineIndex < currentElement->textElementData.wrappedLines.length; ++lineIndex) {
                         Clay__WrappedTextLine *wrappedLine = Clay__WrappedTextLineArraySlice_Get(&currentElement->textElementData.wrappedLines, lineIndex);
                         if (wrappedLine->line.length == 0) {
-                            yPosition += finalLineHeight;
+                            if (!wrappedLine->externalPosition) yPosition += finalLineHeight;
                             continue;
                         }
                         float offset = (currentElementBoundingBox.width - wrappedLine->dimensions.width);
-                        if (wrappedLine->textLayoutId) {
+                        if (wrappedLine->externalPosition) {
                             offset = wrappedLine->offset.x;
                         } else {
                             if (textElementConfig->textAlignment == CLAY_TEXT_ALIGN_LEFT) {
@@ -3882,7 +3885,7 @@ void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool us
                             }
                         }
                         Clay__AddRenderCommand(CLAY__INIT(Clay_RenderCommand) {
-                            .boundingBox = { currentElementBoundingBox.x + offset, currentElementBoundingBox.y + yPosition, wrappedLine->dimensions.width, wrappedLine->dimensions.height },
+                            .boundingBox = { currentElementBoundingBox.x + offset, currentElementBoundingBox.y + (wrappedLine->externalPosition ? wrappedLine->offset.y : yPosition), wrappedLine->dimensions.width, wrappedLine->dimensions.height },
                             .renderData = { .text = {
                                 .stringContents = CLAY__INIT(Clay_StringSlice) { .length = wrappedLine->line.length, .chars = wrappedLine->line.chars, .baseChars = currentElement->textElementData.text.chars },
                                 .textColor = textElementConfig->textColor,
@@ -3898,9 +3901,11 @@ void Clay__PositionTreeRoots(Clay__LayoutElementTreeNodeArray dfsBuffer, bool us
                             .zIndex = root->zIndex,
                             .commandType = CLAY_RENDER_COMMAND_TYPE_TEXT,
                         });
-                        yPosition += finalLineHeight;
+                        if (!wrappedLine->externalPosition) yPosition += finalLineHeight;
 
-                        if (!context->disableCulling && (currentElementBoundingBox.y + yPosition > context->layoutDimensions.height)) {
+                        // External callbacks own vertical placement. The default
+                        // line-height accumulator cannot predict their next line.
+                        if (!wrappedLine->externalPosition && !context->disableCulling && (currentElementBoundingBox.y + yPosition > context->layoutDimensions.height)) {
                             break;
                         }
                     }
